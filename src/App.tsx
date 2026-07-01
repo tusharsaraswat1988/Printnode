@@ -18,12 +18,26 @@ import PrintersList from "./components/PrintersList";
 import JobsList from "./components/JobsList";
 import ClientGuide from "./components/ClientGuide";
 import VirtualPrinter from "./components/VirtualPrinter";
+import LoginPage from "./components/LoginPage";
 
 export default function App() {
   const [printers, setPrinters] = useState<Printer[]>([]);
   const [jobs, setJobs] = useState<PrintJob[]>([]);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [activeTab, setActiveTab] = useState<"queue" | "printers" | "connect">("queue");
+  const [user, setUser] = useState<{ mobile: string } | null>(null);
+  const [loading, setLoading] = useState(true);
+
+  // Check login status
+  useEffect(() => {
+    fetch("/api/me", { credentials: 'include' })
+      .then(res => res.json())
+      .then(data => {
+        setUser(data.user);
+        setLoading(false);
+      })
+      .catch(() => setLoading(false));
+  }, []);
 
   // Fetch all printers
   const fetchPrinters = useCallback(async () => {
@@ -78,6 +92,10 @@ export default function App() {
   // Selected printer key for quick reference in Connection guide
   const firstPrinter = printers[0];
 
+  if (loading) return <div className="min-h-screen flex items-center justify-center">Loading...</div>;
+
+  if (!user) return <LoginPage onLogin={() => window.location.reload()} />;
+
   return (
     <div className="min-h-screen bg-slate-50 font-sans text-slate-800" id="main-app">
       {/* Top Ambient Navigation Bar */}
@@ -99,6 +117,12 @@ export default function App() {
           </div>
 
           <div className="flex items-center space-x-3 text-xs text-slate-500 font-medium">
+            <button
+              onClick={async () => { await fetch("/api/logout", { method: "POST", credentials: 'include' }); window.location.reload(); }}
+              className="px-4 py-2 text-red-600 hover:text-red-800 font-semibold"
+            >
+              Logout
+            </button>
             <div className="hidden sm:flex items-center space-x-1.5 bg-slate-50 border border-slate-200 px-3 py-1.5 rounded-lg">
               <Globe className="h-3.5 w-3.5 text-indigo-500" />
               <span>Worldwide printing network</span>

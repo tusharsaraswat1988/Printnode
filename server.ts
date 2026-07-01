@@ -1,6 +1,8 @@
 import express from "express";
 import path from "path";
 import fs from "fs";
+import cookieParser from "cookie-parser";
+import session from "express-session";
 import { createServer as createViteServer } from "vite";
 import { PrintJob, Printer } from "./src/types";
 
@@ -28,50 +30,9 @@ let printers: Printer[] = [
   }
 ];
 
-let jobs: PrintJob[] = [
-  {
-    id: "job-1",
-    printerId: "printer-wired-pc",
-    fileName: "flight_ticket_roundtrip.pdf",
-    fileType: "application/pdf",
-    fileSize: 251400,
-    fileData: "JVBERi0xLjQKJ... [Simulated PDF]", // Placeholder for initial demo jobs
-    copies: 1,
-    colorMode: "mono",
-    paperSize: "A4",
-    status: "completed",
-    createdAt: new Date(Date.now() - 45 * 60 * 1000).toISOString(), // 45 min ago
-    updatedAt: new Date(Date.now() - 44 * 60 * 1000).toISOString(),
-  },
-  {
-    id: "job-2",
-    printerId: "printer-wired-pc",
-    fileName: "family_vacation_photo.jpg",
-    fileType: "image/jpeg",
-    fileSize: 1258200,
-    fileData: "/9j/4AAQSkZJRgABAQ... [Simulated Image]",
-    copies: 2,
-    colorMode: "color",
-    paperSize: "Letter",
-    status: "completed",
-    createdAt: new Date(Date.now() - 120 * 60 * 1000).toISOString(), // 2 hours ago
-    updatedAt: new Date(Date.now() - 119 * 60 * 1000).toISOString(),
-  },
-  {
-    id: "job-3",
-    printerId: "printer-office-laser",
-    fileName: "rental_agreement_signed.pdf",
-    fileType: "application/pdf",
-    fileSize: 421900,
-    fileData: "JVBERi0xLjQKJ... [Simulated PDF]",
-    copies: 1,
-    colorMode: "mono",
-    paperSize: "Letter",
-    status: "failed",
-    statusMessage: "Printer connection timed out. Printer offline.",
-    createdAt: new Date(Date.now() - 180 * 60 * 1000).toISOString(), // 3 hours ago
-    updatedAt: new Date(Date.now() - 170 * 60 * 1000).toISOString(),
-  }
+let jobs: PrintJob[] = [];
+let users: { mobile: string; password: string }[] = [
+  { mobile: "1234567890", password: "123456" } // Default admin/user
 ];
 
 // Load from disk if exists
@@ -81,6 +42,7 @@ function loadStore() {
       const data = JSON.parse(fs.readFileSync(STORE_PATH, "utf-8"));
       if (data.printers) printers = data.printers;
       if (data.jobs) jobs = data.jobs;
+      if (data.users) users = data.users;
       console.log("Successfully loaded print store from disk");
     }
   } catch (err) {
@@ -91,7 +53,7 @@ function loadStore() {
 // Save to disk
 function saveStore() {
   try {
-    const data = { printers, jobs };
+    const data = { printers, jobs, users };
     fs.writeFileSync(STORE_PATH, JSON.stringify(data, null, 2), "utf-8");
   } catch (err) {
     console.error("Error saving print store to disk", err);
@@ -108,6 +70,76 @@ async function startServer() {
   // Set up body parsers with limits for uploads (up to 50MB)
   app.use(express.json({ limit: "50mb" }));
   app.use(express.urlencoded({ limit: "50mb", extended: true }));
+  app.set('trust proxy', 1);
+  app.use(cookieParser());
+  app.use(session({
+    secret: 'secret-key-123',
+    resave: true,
+    saveUninitialized: true,
+    cookie: { secure: true, sameSite: 'lax' }
+  }));
+
+  // Auth Middleware
+  const isAuthenticated = (req: any, res: any, next: any) => {
+    if (req.session.user) {
+      next();
+    } else {
+      res.status(401).json({ error: "Unauthorized" });
+    }
+  };
+
+  // Auth API
+  app.post("/api/login", (req: any, res: any) => {
+    const { mobile, password } = req.body;
+    const user = users.find(u => u.mobile === mobile && u.password === password);
+    if (user) {
+      req.session.user = { mobile };
+      req.session.save((err) => {
+        if (err) {
+          return res.status(500).json({ error: "Failed to save session" });
+        }
+        res.json({ success: true });
+      });
+    } else {
+      res.status(401).json({ error: "Invalid credentials" });
+    }
+  });
+
+  app.post("/api/logout", (req: any, res: any) => {
+    req.session.destroy(() => {
+      res.json({ success: true });
+    });
+  });
+
+  app.get("/api/me", (req: any, res: any) => {
+    res.json({ user: req.session.user || null });
+  });
+
+  // Admin API (simplified)
+  app.post("/api/admin/users", (req: any, res: any) => {
+    // Basic protection: only allowing if mobile matches default or some check
+    if (!req.session.user || req.session.user.mobile !== "1234567890") {
+      return res.status(403).json({ error: "Forbidden" });
+    }
+    const { mobile, password } = req.body;
+    const existingIndex = users.findIndex(u => u.mobile === mobile);
+    if (existingIndex !== -1) {
+      users[existingIndex].password = password;
+    } else {
+      users.push({ mobile, password });
+    }
+    saveStore();
+    res.json({ success: true });
+  });
+
+  // Protect all API routes except login
+  app.use("/api", (req, res, next) => {
+    if (req.path === "/login" || req.path === "/me" || req.path === "/printers/ping" || req.path.startsWith("/jobs/poll/") || req.path === "/download-daemon") {
+      next();
+    } else {
+      isAuthenticated(req, res, next);
+    }
+  });
 
   // Helper: auto offline checker middleware or function
   // Mark printers offline if they haven't pinged in 2 minutes
@@ -206,6 +238,13 @@ async function startServer() {
     // If it was offline, mark online
     if (printer.status === "offline") {
       printer.status = "online";
+    }
+
+    // Handle detected printers
+    if (req.body.detectedPrinters && Array.isArray(req.body.detectedPrinters)) {
+      // Logic to auto-register or update if needed
+      console.log(`Detected printers from ${printerId}:`, req.body.detectedPrinters);
+      // For now, just log them, maybe update the printer name if it's the one?
     }
 
     // Check if there are any active printing jobs, if so keep status as "printing"
@@ -388,6 +427,11 @@ async function startServer() {
     res.json({ success: true, message: "Job removed from queue" });
   });
 
+  // 12. GET /api/download-daemon - Serves the updated daemon script file
+  app.get("/api/download-daemon", (req, res) => {
+    res.download(path.join(process.cwd(), 'src/daemon/print-daemon.js'), 'print-daemon.js');
+  });
+
   // 11. GET /api/client-script - Serves a copyable raw text of the printer client script!
   app.get("/api/client-script", (req, res) => {
     const appUrl = process.env.APP_URL || `http://localhost:${PORT}`;
@@ -430,6 +474,27 @@ console.log("=========================================");
 const TEMP_DIR = path.join(__dirname, 'temp_prints');
 if (!fs.existsSync(TEMP_DIR)) {
   fs.mkdirSync(TEMP_DIR);
+}
+
+// Fetch printers installed on the PC
+function getPrinters() {
+  return new Promise((resolve) => {
+    const platform = process.platform;
+    let command = '';
+    if (platform === 'win32') {
+      command = 'powershell.exe -Command "Get-Printer | Select-Object -ExpandProperty Name"';
+    } else {
+      command = 'lpstat -p | cut -d" " -f2';
+    }
+    exec(command, (error, stdout) => {
+      if (error) {
+        resolve([]);
+      } else {
+        const printers = stdout.trim().split('\n').filter(p => p.length > 0);
+        resolve(printers);
+      }
+    });
+  });
 }
 
 const requestHelper = (url, options = {}) => {

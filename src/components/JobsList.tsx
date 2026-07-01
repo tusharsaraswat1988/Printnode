@@ -144,13 +144,6 @@ export default function JobsList({ jobs, printers, onJobDeleted, onRefresh, isRe
         </div>
 
         <div className="flex items-center space-x-2 shrink-0">
-          {selectedJobIds.length > 0 && (
-            <div className="flex items-center space-x-2 mr-4 bg-slate-100 px-3 py-1.5 rounded-lg border border-slate-200">
-              <span className="text-xs font-bold text-slate-700">{selectedJobIds.length} Selected</span>
-              <button onClick={handleBulkRetry} className="text-xs font-bold text-indigo-600 hover:text-indigo-800">Retry</button>
-              <button onClick={handleBulkDelete} className="text-xs font-bold text-red-600 hover:text-red-800">Delete</button>
-            </div>
-          )}
           <label className="text-xs font-bold text-slate-500 uppercase tracking-wider" htmlFor="filter-select">
             Filter by:
           </label>
@@ -169,6 +162,17 @@ export default function JobsList({ jobs, printers, onJobDeleted, onRefresh, isRe
           </select>
         </div>
       </div>
+
+      {/* Bulk Action Toolbar */}
+      {selectedJobIds.length > 0 && (
+        <div className="mb-6 flex items-center justify-between bg-indigo-50 border border-indigo-100 p-4 rounded-xl shadow-inner">
+          <span className="text-sm font-bold text-indigo-900">{selectedJobIds.length} jobs selected</span>
+          <div className="flex items-center space-x-2">
+            <button onClick={handleBulkRetry} className="px-3 py-1.5 bg-white text-indigo-700 hover:bg-indigo-50 border border-indigo-200 rounded-lg text-xs font-bold transition-all">Retry Selected</button>
+            <button onClick={handleBulkDelete} className="px-3 py-1.5 bg-white text-red-600 hover:bg-red-50 border border-red-200 rounded-lg text-xs font-bold transition-all">Cancel Selected</button>
+          </div>
+        </div>
+      )}
 
       {/* Queue Listing */}
       <div className="space-y-4">

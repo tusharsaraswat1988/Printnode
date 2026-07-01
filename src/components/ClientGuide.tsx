@@ -81,7 +81,7 @@ export default function ClientGuide({ selectedPrinterId = "YOUR_PRINTER_ID", sel
         <div className="flex items-center space-x-2">
           {/* Direct download endpoint */}
           <a
-            href="/api/client-script"
+            href="/api/download-daemon"
             download="print-daemon.js"
             className="inline-flex items-center space-x-1 px-2.5 py-1 bg-slate-700 hover:bg-slate-600 text-slate-100 text-[10px] font-semibold rounded transition-all"
             title="Download JS script"
