@@ -72,11 +72,15 @@ async function startServer() {
   app.use(express.urlencoded({ limit: "50mb", extended: true }));
   app.set('trust proxy', 1);
   app.use(cookieParser());
+  app.use((req, res, next) => {
+    console.log(`[Request] ${req.method} ${req.path}, Session: ${JSON.stringify(req.session)}`);
+    next();
+  });
   app.use(session({
     secret: 'secret-key-123',
     resave: true,
     saveUninitialized: true,
-    cookie: { secure: true, sameSite: 'lax' }
+    cookie: { secure: false, sameSite: 'lax', path: '/' }
   }));
 
   // Auth Middleware

@@ -14,6 +14,12 @@ export default function PrintersList({ printers, onPrinterAdded, onPrinterDelete
   const [location, setLocation] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [copiedId, setCopiedId] = useState<string | null>(null);
+  const [searchTerm, setSearchTerm] = useState("");
+
+  const filteredPrinters = printers.filter(p =>
+    p.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
+    p.status.toLowerCase().includes(searchTerm.toLowerCase())
+  );
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -88,6 +94,16 @@ export default function PrintersList({ printers, onPrinterAdded, onPrinterDelete
         </button>
       </div>
 
+      <div className="mb-6">
+        <input
+          type="text"
+          placeholder="Search printers by name or status..."
+          value={searchTerm}
+          onChange={(e) => setSearchTerm(e.target.value)}
+          className="w-full text-sm rounded-lg border border-slate-200 px-3 py-2.5 bg-white text-slate-800 focus:outline-hidden focus:ring-2 focus:ring-indigo-500 transition-all"
+        />
+      </div>
+
       {/* Add Printer Form */}
       {showAddForm && (
         <form onSubmit={handleSubmit} className="mb-6 bg-slate-50 p-5 rounded-xl border border-slate-200 space-y-4">
@@ -130,14 +146,14 @@ export default function PrintersList({ printers, onPrinterAdded, onPrinterDelete
 
       {/* Printers Listing */}
       <div className="space-y-4">
-        {printers.length === 0 ? (
+        {filteredPrinters.length === 0 ? (
           <div className="text-center py-10 border border-dashed border-slate-200 rounded-xl bg-slate-50/20">
             <PrinterIcon className="h-10 w-10 text-slate-300 mx-auto mb-3" />
-            <p className="text-xs font-bold text-slate-500">No printers registered yet</p>
-            <p className="text-[10px] text-slate-400 mt-1">Add your first printer to start remote queueing.</p>
+            <p className="text-xs font-bold text-slate-500">{printers.length > 0 ? "No printers match your search" : "No printers registered yet"}</p>
+            <p className="text-[10px] text-slate-400 mt-1">{printers.length > 0 ? "Try adjusting your search query." : "Add your first printer to start remote queueing."}</p>
           </div>
         ) : (
-          printers.map((p) => {
+          filteredPrinters.map((p) => {
             const isOnline = p.status === "online" || p.status === "printing";
             const isPrinting = p.status === "printing";
             return (
