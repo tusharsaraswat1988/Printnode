@@ -5,6 +5,17 @@ import cookieParser from "cookie-parser";
 import session from "express-session";
 import { createServer as createViteServer } from "vite";
 import { PrintJob, Printer } from "./src/types";
+import { FirebaseFileStorage } from "./src/storage/firebaseStorage";
+import * as admin from 'firebase-admin';
+
+if (!admin.apps.length) {
+  admin.initializeApp({
+    credential: admin.credential.applicationDefault(),
+    storageBucket: process.env.FIREBASE_STORAGE_BUCKET
+  });
+}
+const db = admin.firestore();
+const storage = new FirebaseFileStorage();
 
 // In-memory / File persistent data store
 const STORE_PATH = path.join(process.cwd(), "print_store.json");
@@ -72,7 +83,7 @@ async function startServer() {
   app.use(express.urlencoded({ limit: "50mb", extended: true }));
   app.set('trust proxy', 1);
   app.use(cookieParser());
-  app.use((req, res, next) => {
+  app.use((req: any, res: any, next: any) => {
     console.log(`[Request] ${req.method} ${req.path}, Session: ${JSON.stringify(req.session)}`);
     next();
   });
@@ -272,13 +283,30 @@ async function startServer() {
       filteredJobs = jobs.filter(j => j.printerId === printerId);
     }
 
-    // Map jobs to exclude heavy fileData
-    const lightJobs = filteredJobs.map(({ fileData, ...rest }) => rest);
+    // Map jobs to ensure clean response
+    const lightJobs = filteredJobs.map(({ ...rest }) => rest);
     res.json(lightJobs);
   });
 
+  // Cleanup orphaned files on startup
+  async function cleanupOrphanedFiles() {
+    const uploadDir = path.join(process.cwd(), 'uploads');
+    if (!fs.existsSync(uploadDir)) return;
+    
+    const files = fs.readdirSync(uploadDir);
+    const validFileIds = new Set(jobs.map(j => j.fileId));
+    
+    for (const file of files) {
+      if (!validFileIds.has(file)) {
+        console.log(`Cleaning orphaned file: ${file}`);
+        await storage.delete(file);
+      }
+    }
+  }
+  cleanupOrphanedFiles();
+
   // 6. POST /api/jobs - Submit a new print job
-  app.post("/api/jobs", (req, res) => {
+  app.post("/api/jobs", async (req, res) => {
     const { printerId, fileName, fileType, fileSize, fileData, copies, colorMode, paperSize } = req.body;
 
     if (!printerId || !fileName || !fileData) {
@@ -296,22 +324,35 @@ async function startServer() {
       fileName,
       fileType: fileType || "application/octet-stream",
       fileSize: fileSize || 0,
-      fileData,
+      fileId: "", // Will be filled below
       copies: copies || 1,
       colorMode: colorMode || "color",
       paperSize: paperSize || "Letter",
       status: "pending",
+      retryCount: 0,
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
     };
+
+    // Save file
+    try {
+      let base64Data = fileData;
+      if (base64Data.includes(";base64,")) {
+        base64Data = base64Data.split(";base64,").pop() || "";
+      }
+      const buffer = Buffer.from(base64Data, "base64");
+      newJob.fileId = newJob.id;
+      await storage.save(newJob.fileId, buffer);
+    } catch (err) {
+      return res.status(500).json({ error: "Failed to store file" });
+    }
 
     jobs.unshift(newJob); // Put at start of list
     printer.jobCount += 1;
     saveStore();
 
     // Respond with light version
-    const { fileData: _, ...lightJob } = newJob;
-    res.status(201).json(lightJob);
+    res.status(201).json(newJob);
   });
 
   // 7. GET /api/jobs/poll/:printerId - Poll for pending jobs for a specific printer (requires apiKey header or query)
@@ -349,7 +390,7 @@ async function startServer() {
   });
 
   // 8. GET /api/jobs/:id/download - Stream binary download of the job's file
-  app.get("/api/jobs/:id/download", (req, res) => {
+  app.get("/api/jobs/:id/download", async (req, res) => {
     const { id } = req.params;
     const job = jobs.find(j => j.id === id);
 
@@ -358,27 +399,28 @@ async function startServer() {
     }
 
     try {
-      // Decode base64 to binary buffer
-      // Extract standard base64 content if it contains data URI header
-      let base64Data = job.fileData;
-      if (base64Data.includes(";base64,")) {
-        base64Data = base64Data.split(";base64,").pop() || "";
+      const exists = await storage.exists(job.fileId);
+      if (!exists) {
+        return res.status(404).json({ error: "File not found in storage" });
       }
-
-      const fileBuffer = Buffer.from(base64Data, "base64");
 
       res.setHeader("Content-Type", job.fileType);
       res.setHeader("Content-Disposition", `attachment; filename="${encodeURIComponent(job.fileName)}"`);
-      res.setHeader("Content-Length", fileBuffer.length);
-      res.send(fileBuffer);
+      
+      const stream = storage.getStream(job.fileId);
+      stream.pipe(res);
+      stream.on('error', (err) => {
+        console.error("Error streaming file", err);
+        res.status(500).json({ error: "Failed to stream file" });
+      });
     } catch (err) {
-      console.error("Error generating binary download", err);
-      res.status(500).json({ error: "Failed to decode and download file" });
+      console.error("Error streaming file", err);
+      res.status(500).json({ error: "Failed to download file" });
     }
   });
 
   // 9. POST /api/jobs/:id/status - Update job status
-  app.post("/api/jobs/:id/status", (req, res) => {
+  app.post("/api/jobs/:id/status", async (req, res) => {
     const { id } = req.params;
     const { status, statusMessage } = req.body;
 
@@ -392,6 +434,10 @@ async function startServer() {
       return res.status(404).json({ error: "Job not found" });
     }
 
+    if (status === "pending" && job.status === "failed") {
+        job.retryCount += 1;
+    }
+    
     job.status = status;
     job.statusMessage = statusMessage || undefined;
     job.updatedAt = new Date().toISOString();
@@ -403,6 +449,9 @@ async function startServer() {
       if (status === "printing") {
         printer.status = "printing";
       } else if (status === "completed" || status === "failed") {
+        // Delete file on completion/failure
+        await storage.delete(job.fileId);
+        
         // Check if there are other jobs actively printing on this printer
         const otherPrinting = jobs.some(j => j.printerId === printer.id && j.id !== id && j.status === "printing");
         printer.status = otherPrinting ? "printing" : "online";
@@ -414,7 +463,7 @@ async function startServer() {
   });
 
   // 10. DELETE /api/jobs/:id - Delete/Cancel a print job
-  app.delete("/api/jobs/:id", (req, res) => {
+  app.delete("/api/jobs/:id", async (req, res) => {
     const { id } = req.params;
     const index = jobs.findIndex(j => j.id === id);
 
@@ -424,6 +473,9 @@ async function startServer() {
 
     const job = jobs[index];
     
+    // Delete file
+    await storage.delete(job.fileId);
+
     // Only allow deleting if not actively printing/downloading, or just remove anyway
     jobs.splice(index, 1);
     saveStore();

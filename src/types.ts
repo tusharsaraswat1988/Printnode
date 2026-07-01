@@ -6,12 +6,13 @@ export interface PrintJob {
   fileName: string;
   fileType: string;
   fileSize: number;
-  fileData: string; // Base64 encoded file content
+  fileId: string; // File reference ID
   copies: number;
   colorMode: 'color' | 'mono';
   paperSize: 'A4' | 'Letter' | 'Legal';
   status: JobStatus;
   statusMessage?: string;
+  retryCount: number;
   createdAt: string;
   updatedAt: string;
 }
