@@ -1,0 +1,6 @@
+{
+  "name": "Remote Print Queue",
+  "description": "Cloud-based synchronization and remote queue management to print photos and documents from any mobile or PC device.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
