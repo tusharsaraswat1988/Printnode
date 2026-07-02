@@ -1,4 +1,4 @@
-export type JobStatus = 'pending' | 'downloading' | 'printing' | 'completed' | 'failed';
+export type JobStatus = 'pending' | 'downloading' | 'verifying' | 'queued' | 'spooling' | 'printing' | 'printed' | 'completed' | 'failed';
 
 export interface AuditLogEntry {
   status: JobStatus;
@@ -38,6 +38,12 @@ export interface Printer {
   lastSeen: string;
   apiKey: string;
   jobCount: number;
+  // Enterprise Diagnostic Telemetry
+  queueLength?: number;
+  paperStatus?: string;
+  tonerStatus?: string;
+  daemonVersion?: string;
+  uptime?: number;
 }
 
 export interface User {

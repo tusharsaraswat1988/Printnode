@@ -22,6 +22,18 @@ export default function UploadZone({ printers, onJobCreated }: UploadZoneProps) 
 
   const fileInputRef = useRef<HTMLInputElement>(null);
 
+  // Load local storage default presets if they exist
+  React.useEffect(() => {
+    const savedCopies = localStorage.getItem("print_default_copies");
+    if (savedCopies) setCopies(parseInt(savedCopies));
+
+    const savedPaper = localStorage.getItem("print_default_paper");
+    if (savedPaper) setPaperSize(savedPaper as any);
+
+    const savedColor = localStorage.getItem("print_default_color");
+    if (savedColor) setColorMode(savedColor as any);
+  }, []);
+
   // Initialize selected printer if not set
   React.useEffect(() => {
     const onlinePrinters = printers.filter(p => p.status !== "offline");

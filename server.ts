@@ -74,9 +74,38 @@ function verifyToken(token: string): { mobile: string; role: string } | null {
   }
 }
 
+function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error("Timeout")), ms);
+    promise.then(
+      (res) => {
+        clearTimeout(timer);
+        resolve(res);
+      },
+      (err) => {
+        clearTimeout(timer);
+        reject(err);
+      }
+    );
+  });
+}
+
 async function startServer() {
   const app = express();
   const PORT = 3000;
+
+  // Verify database connection at startup
+  if (process.env.DATABASE_URL) {
+    try {
+      logger.info("Verifying Neon DB connection...");
+      // Try to query printers with a 3-second timeout
+      await withTimeout(repository.getPrinters(), 3000);
+      logger.info("Neon DB connection verified successfully.");
+    } catch (err) {
+      logger.warn("Neon DB connection verification failed or timed out. Swapping to LocalJSONRepository.", { error: err });
+      repository = new LocalJSONRepository();
+    }
+  }
 
   // Rate Limiting Middleware
   const rateLimitMap = new Map<string, { count: number; resetTime: number }>();
@@ -285,6 +314,8 @@ async function startServer() {
                      req.path === "/me" || 
                      req.path === "/printers/ping" || 
                      req.path.startsWith("/jobs/poll/") || 
+                     req.path.endsWith("/download") || 
+                     req.path.endsWith("/status") || 
                      req.path === "/download-daemon" ||
                      req.path === "/client-script";
     if (isPublic) {
@@ -340,7 +371,7 @@ async function startServer() {
   }
 
   // Check statuses every 10 seconds
-  setInterval(auditPrinterStatuses, 1000);
+  setInterval(auditPrinterStatuses, 10000);
 
   // --- PRINTER ENDPOINTS ---
   app.get("/api/printers", async (req, res) => {
@@ -406,8 +437,52 @@ async function startServer() {
     }
   });
 
+  app.post("/api/printers/:id/rename", async (req, res) => {
+    const { id } = req.params;
+    const { name, location } = req.body;
+    if (!name) {
+      return res.status(400).json({ error: "Printer name is required" });
+    }
+    try {
+      const printer = await repository.getPrinter(id);
+      if (!printer) {
+        return res.status(404).json({ error: "Printer not found" });
+      }
+      printer.name = name;
+      if (location !== undefined) {
+        printer.location = location;
+      }
+      await repository.savePrinter(printer);
+      logger.info(`Successfully renamed printer '${id}' to '${name}'`);
+      res.json({ success: true, printer });
+    } catch (err) {
+      res.status(500).json({ error: "Failed to rename printer" });
+    }
+  });
+
+  app.get("/api/admin/users", requireAdmin, async (req: any, res: any) => {
+    try {
+      const users = await repository.getUsers();
+      // Remove passwords from response for security, or keep them if they need to see them.
+      // Since it's a private admin dashboard, we can return mobile and role.
+      res.json(users.map(u => ({ mobile: u.mobile, role: u.role })));
+    } catch (err) {
+      res.status(500).json({ error: "Failed to retrieve users" });
+    }
+  });
+
   app.post("/api/printers/ping", async (req, res) => {
-    const { apiKey, printerId, detectedPrinters } = req.body;
+    const { 
+      apiKey, 
+      printerId, 
+      detectedPrinters,
+      queueLength,
+      paperStatus,
+      tonerStatus,
+      daemonVersion,
+      uptime
+    } = req.body;
+    
     if (!apiKey || !printerId) {
       return res.status(400).json({ error: "apiKey and printerId are required" });
     }
@@ -426,6 +501,13 @@ async function startServer() {
       if (detectedPrinters && Array.isArray(detectedPrinters)) {
         logger.info(`Detected physical devices from print client '${printerId}':`, detectedPrinters);
       }
+
+      // Update diagnostic telemetry
+      if (queueLength !== undefined) printer.queueLength = queueLength;
+      if (paperStatus !== undefined) printer.paperStatus = paperStatus;
+      if (tonerStatus !== undefined) printer.tonerStatus = tonerStatus;
+      if (daemonVersion !== undefined) printer.daemonVersion = daemonVersion;
+      if (uptime !== undefined) printer.uptime = uptime;
 
       // Concurrency print check
       const jobsList = await repository.getJobs();
@@ -604,6 +686,16 @@ async function startServer() {
         return res.status(404).json({ error: "Job metadata not found" });
       }
 
+      // Security Check: Authorized either via active user session or valid daemon API key
+      const printer = await repository.getPrinter(job.printerId);
+      const apiKey = req.headers["x-api-key"] || req.query.apiKey;
+      const isDaemonAuthorized = printer && apiKey === printer.apiKey;
+      const hasSession = (req as any).session && (req as any).session.user;
+
+      if (!hasSession && !isDaemonAuthorized) {
+        return res.status(401).json({ error: "Unauthorized: Missing active session or valid API Key." });
+      }
+
       const fileExists = await storage.exists(job.fileId);
       if (!fileExists) {
         return res.status(404).json({ error: "Print asset not found in storage" });
@@ -630,7 +722,17 @@ async function startServer() {
     const { id } = req.params;
     const { status, statusMessage } = req.body;
 
-    const permittedStatuses = ["pending", "downloading", "printing", "completed", "failed"];
+    const permittedStatuses = [
+      "pending", 
+      "downloading", 
+      "verifying", 
+      "queued", 
+      "spooling", 
+      "printing", 
+      "printed", 
+      "completed", 
+      "failed"
+    ];
     if (!status || !permittedStatuses.includes(status)) {
       return res.status(400).json({ error: "Invalid or missing status" });
     }
@@ -639,6 +741,16 @@ async function startServer() {
       const job = await repository.getJob(id);
       if (!job) {
         return res.status(404).json({ error: "Job not found" });
+      }
+
+      // Security Check: Authorized either via active user session or valid daemon API key
+      const printer = await repository.getPrinter(job.printerId);
+      const apiKey = req.headers["x-api-key"] || req.query.apiKey;
+      const isDaemonAuthorized = printer && apiKey === printer.apiKey;
+      const hasSession = (req as any).session && (req as any).session.user;
+
+      if (!hasSession && !isDaemonAuthorized) {
+        return res.status(401).json({ error: "Unauthorized: Missing active session or valid API Key." });
       }
 
       // Record retry loop count if user resets failed job back to pending
@@ -662,22 +774,20 @@ async function startServer() {
         message: statusMessage || `Transitioned state to ${status}.`
       });
 
-      const printer = await repository.getPrinter(job.printerId);
       if (printer) {
         printer.lastSeen = new Date().toISOString();
-        if (status === "printing") {
-          printer.status = "printing";
-        } else if (status === "completed" || status === "failed") {
-          // Keep files in storage until success, or delete them when completed/permanently failed
-          // Real enterprise logic: Delete files on successful completion to save storage size
-          if (status === "completed") {
-            await storage.delete(job.fileId).catch(() => {});
-          }
-          
-          // Re-evaluate other printing jobs to determine final printer status
-          const jobsList = await repository.getJobs();
-          const otherPrinting = jobsList.some(j => j.printerId === printer.id && j.id !== id && j.status === "printing");
-          printer.status = otherPrinting ? "printing" : "online";
+        
+        // Comprehensive printer busy status logic based on all intermediate spooling/printing states
+        const activePrintingStatuses = ["downloading", "verifying", "queued", "spooling", "printing", "printed"];
+        const jobsList = await repository.getJobs();
+        const otherActive = jobsList.some(j => j.printerId === printer.id && j.id !== id && activePrintingStatuses.includes(j.status));
+        const currentActive = activePrintingStatuses.includes(status);
+        
+        printer.status = (currentActive || otherActive) ? "printing" : "online";
+
+        // Clean up stored files on completion
+        if (status === "completed") {
+          await storage.delete(job.fileId).catch(() => {});
         }
         await repository.savePrinter(printer);
       }
@@ -719,233 +829,16 @@ async function startServer() {
 
   app.get("/api/client-script", (req, res) => {
     const appUrl = process.env.APP_URL || `http://localhost:${PORT}`;
-    
-    const clientCode = `/**
- * Remote Printer Daemon Client (Node.js)
- * Save this file as 'print-daemon.js' on your Wired PC and run it:
- *   node print-daemon.js <PRINTER_ID> <API_KEY>
- */
-
-const http = require('http');
-const https = require('https');
-const fs = require('fs');
-const path = require('path');
-const crypto = require('crypto');
-const { exec } = require('child_process');
-
-// Parse Arguments
-const args = process.argv.slice(2);
-const PRINTER_ID = args[0];
-const API_KEY = args[1];
-const SERVER_URL = args[2] || "${appUrl}";
-
-if (!PRINTER_ID || !API_KEY) {
-  console.error("Error: Missing parameters.");
-  console.log("");
-  console.log("Usage: node print-daemon.js <PRINTER_ID> <API_KEY> [SERVER_URL]");
-  console.log("Example: node print-daemon.js printer-wired-pc print_k_d3b1f9");
-  process.exit(1);
-}
-
-console.log("=========================================");
-console.log("   REMOTE PRINT DAEMON RUNNING           ");
-console.log("=========================================");
-console.log(\`Printer ID: \${PRINTER_ID}\`);
-console.log(\`Server URL: \${SERVER_URL}\`);
-console.log("Status    : Connecting and listening for print jobs...");
-console.log("=========================================");
-
-// Ensure temporary prints folder exists
-const TEMP_DIR = path.join(__dirname, 'temp_prints');
-if (!fs.existsSync(TEMP_DIR)) {
-  fs.mkdirSync(TEMP_DIR);
-}
-
-// Fetch printers installed on the PC
-function getPrinters() {
-  return new Promise((resolve) => {
-    const platform = process.platform;
-    let command = '';
-    if (platform === 'win32') {
-      command = 'powershell.exe -Command "Get-Printer | Select-Object -ExpandProperty Name"';
-    } else {
-      command = 'lpstat -p | cut -d" " -f2';
-    }
-    exec(command, (error, stdout) => {
-      if (error) {
-        resolve([]);
-      } else {
-        const printers = stdout.trim().split('\\n').filter(p => p.length > 0);
-        resolve(printers);
-      }
-    });
-  });
-}
-
-const requestHelper = (url, options = {}) => {
-  return new Promise((resolve, reject) => {
-    const client = url.startsWith('https') ? https : http;
-    const req = client.request(url, options, (res) => {
-      let data = '';
-      res.on('data', (chunk) => { data += chunk; });
-      res.on('end', () => {
-        if (res.statusCode >= 200 && res.statusCode < 300) {
-          resolve({ statusCode: res.statusCode, data, headers: res.headers });
-        } else {
-          reject(new Error(\`HTTP \${res.statusCode}: \${data}\`));
-        }
-      });
-    });
-    req.on('error', (err) => reject(err));
-    if (options.body) {
-      req.write(typeof options.body === 'string' ? options.body : JSON.stringify(options.body));
-    }
-    req.end();
-  });
-};
-
-const downloadFile = (url, destPath) => {
-  return new Promise((resolve, reject) => {
-    const client = url.startsWith('https') ? https : http;
-    const file = fs.createWriteStream(destPath);
-    client.get(url, (res) => {
-      if (res.statusCode !== 200) {
-        reject(new Error(\`Download failed: HTTP \${res.statusCode}\`));
-        return;
-      }
-      res.pipe(file);
-      file.on('finish', () => {
-        file.close();
-        resolve();
-      });
-    }).on('error', (err) => {
-      fs.unlink(destPath, () => {});
-      reject(err);
-    });
-  });
-};
-
-// Update status back to server
-async function updateJobStatus(jobId, status, statusMessage = '') {
-  try {
-    await requestHelper(\`\${SERVER_URL}/api/jobs/\${jobId}/status\`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: { status, statusMessage }
-    });
-  } catch (err) {
-    console.error(\`Failed to update job status to \${status}:\`, err.message);
-  }
-}
-
-// Native print trigger
-function printFileNative(filePath) {
-  return new Promise((resolve, reject) => {
-    const platform = process.platform;
-    let command = '';
-
-    if (platform === 'win32') {
-      command = \`powershell.exe -Command "Start-Process -FilePath '\${filePath}' -Verb Print"\`;
-    } else if (platform === 'darwin' || platform === 'linux') {
-      command = \`lp "\${filePath}"\`;
-    } else {
-      return reject(new Error(\`Unsupported OS platform: \${platform}\`));
-    }
-
-    console.log(\`Executing command: \${command}\`);
-    exec(command, (error, stdout, stderr) => {
-      if (error) {
-        reject(new Error(\`CLI Print error: \${error.message}. stderr: \${stderr}\`));
-      } else {
-        resolve(stdout);
-      }
-    });
-  });
-}
-
-// Main polling loop
-async function pollQueue() {
-  try {
-    // 1. Ping server to maintain online status and send detected printers
     try {
-      const detectedPrinters = await getPrinters();
-      await requestHelper(\`\${SERVER_URL}/api/printers/ping\`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: { printerId: PRINTER_ID, apiKey: API_KEY, detectedPrinters }
-      });
-    } catch (e) {
-      console.warn(\`[Ping Warning] Unable to ping server: \${e.message}\`);
+      let code = fs.readFileSync(path.join(process.cwd(), "src/daemon/print-daemon.js"), "utf8");
+      // Inject the current server url dynamically as the default URL in the client script
+      code = code.replace("serverUrl: 'http://localhost:3000'", `serverUrl: '${appUrl}'`);
+      res.setHeader("Content-Type", "text/plain");
+      res.send(code);
+    } catch (err) {
+      logger.error("Failed to dynamically load print-daemon.js template", err);
+      res.status(500).send("Failed to read printer client script.");
     }
-
-    // 2. Poll for pending jobs
-    const pollRes = await requestHelper(\`\${SERVER_URL}/api/jobs/poll/\${PRINTER_ID}?apiKey=\${API_KEY}\`);
-    const { job } = JSON.parse(pollRes.data);
-
-    if (job) {
-      console.log(\`\\n[Job Detected] Found job: \${job.fileName} (\${job.id})\`);
-      console.log(\`- Type  : \${job.fileType}\`);
-      console.log(\`- Copies: \${job.copies}\`);
-      console.log(\`- Color : \${job.colorMode}\`);
-      console.log(\`- Paper : \${job.paperSize}\`);
-
-      // A. Set status to Downloading
-      console.log(\`-> Downloading...\`);
-      await updateJobStatus(job.id, 'downloading');
-
-      // B. Download the file
-      const downloadUrl = \`\${SERVER_URL}/api/jobs/\${job.id}/download\`;
-      const localFilePath = path.join(TEMP_DIR, job.fileName);
-      await downloadFile(downloadUrl, localFilePath);
-      console.log(\`-> Downloaded to: \${localFilePath}\`);
-
-      // B2. Verify SHA-256 Checksum Integrity
-      if (job.sha256) {
-        console.log("-> Verifying file integrity checksum (SHA-256)...");
-        const fileBuffer = fs.readFileSync(localFilePath);
-        const localHash = crypto.createHash('sha256').update(fileBuffer).digest('hex');
-        if (localHash !== job.sha256) {
-          console.error(\`-> Checksum mismatch! Expected: \${job.sha256}, Got: \${localHash}\`);
-          await updateJobStatus(job.id, 'failed', 'Integrity check failed: checksum mismatch (SHA-256).');
-          try { fs.unlinkSync(localFilePath); } catch (e) {}
-          return;
-        }
-        console.log("-> Checksum matches perfectly! Payload is clean and verified.");
-      }
-
-      // C. Set status to Printing
-      console.log(\`-> Spooling to printer...\`);
-      await updateJobStatus(job.id, 'printing');
-
-      // D. Try to Print
-      try {
-        await printFileNative(localFilePath);
-        console.log(\`-> PRINT SUCCESSFUL!\`);
-        await updateJobStatus(job.id, 'completed');
-      } catch (printErr) {
-        console.error(\`-> PRINT FAILED: \${printErr.message}\`);
-        await updateJobStatus(job.id, 'failed', printErr.message);
-      }
-
-      // E. Clean up local file
-      try {
-        fs.unlinkSync(localFilePath);
-        console.log(\`-> Cleaned up temp file.\`);
-      } catch (e) {
-        // Ignore file delete error
-      }
-    }
-  } catch (err) {
-    console.error(\`[Error in Polling Loop]: \${err.message}\`);
-  }
-}
-
-// Start polling every 5 seconds
-setInterval(pollQueue, 5000);
-pollQueue(); // Run immediately on start
-`;
-    res.setHeader("Content-Type", "text/plain");
-    res.send(clientCode);
   });
 
   // Vite middleware for development

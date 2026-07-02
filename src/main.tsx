@@ -6,7 +6,12 @@ import './index.css';
 // Global fetch interceptor to support Bearer Token fallback in iframe / cookie-less environments
 const originalFetch = window.fetch;
 const customFetch = async function (input: RequestInfo | URL, init?: RequestInit) {
-  const token = localStorage.getItem("print_auth_token");
+  let token: string | null = null;
+  try {
+    token = window.localStorage ? window.localStorage.getItem("print_auth_token") : null;
+  } catch (e) {
+    console.warn("localStorage is not accessible in this context:", e);
+  }
   let url = "";
   if (typeof input === "string") {
     url = input;

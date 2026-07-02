@@ -20,7 +20,11 @@ export default function LoginPage({ onLogin }: { onLogin: () => void }) {
       if (res.ok) {
         const data = await res.json();
         if (data.token) {
-          localStorage.setItem("print_auth_token", data.token);
+          try {
+            localStorage.setItem("print_auth_token", data.token);
+          } catch (e) {
+            console.warn("localStorage setItem failed:", e);
+          }
         }
         onLogin();
       } else {

@@ -147,8 +147,22 @@ export class NeonRepository implements DataRepository {
             status TEXT NOT NULL,
             last_seen TEXT NOT NULL,
             api_key TEXT NOT NULL,
-            job_count INTEGER NOT NULL DEFAULT 0
+            job_count INTEGER NOT NULL DEFAULT 0,
+            queue_length INTEGER NOT NULL DEFAULT 0,
+            paper_status TEXT NOT NULL DEFAULT 'unknown',
+            toner_status TEXT NOT NULL DEFAULT 'unknown',
+            daemon_version TEXT,
+            uptime DOUBLE PRECISION
           );
+        `);
+
+        // Migration step: ALTER TABLE for existing databases
+        await client.query(`
+          ALTER TABLE printers ADD COLUMN IF NOT EXISTS queue_length INTEGER NOT NULL DEFAULT 0;
+          ALTER TABLE printers ADD COLUMN IF NOT EXISTS paper_status TEXT NOT NULL DEFAULT 'unknown';
+          ALTER TABLE printers ADD COLUMN IF NOT EXISTS toner_status TEXT NOT NULL DEFAULT 'unknown';
+          ALTER TABLE printers ADD COLUMN IF NOT EXISTS daemon_version TEXT;
+          ALTER TABLE printers ADD COLUMN IF NOT EXISTS uptime DOUBLE PRECISION;
         `);
 
         await client.query(`
@@ -265,7 +279,12 @@ export class NeonRepository implements DataRepository {
         status: row.status as 'online' | 'offline' | 'printing',
         lastSeen: row.last_seen,
         apiKey: row.api_key,
-        jobCount: row.job_count
+        jobCount: row.job_count,
+        queueLength: row.queue_length,
+        paperStatus: row.paper_status,
+        tonerStatus: row.toner_status,
+        daemonVersion: row.daemon_version,
+        uptime: row.uptime ? parseFloat(row.uptime) : undefined
       }));
     } catch (err) {
       console.error("NeonRepository: getPrinters failed", err);
@@ -286,7 +305,12 @@ export class NeonRepository implements DataRepository {
         status: row.status as 'online' | 'offline' | 'printing',
         lastSeen: row.last_seen,
         apiKey: row.api_key,
-        jobCount: row.job_count
+        jobCount: row.job_count,
+        queueLength: row.queue_length,
+        paperStatus: row.paper_status,
+        tonerStatus: row.toner_status,
+        daemonVersion: row.daemon_version,
+        uptime: row.uptime ? parseFloat(row.uptime) : undefined
       };
     } catch (err) {
       console.error(`NeonRepository: getPrinter ${id} failed`, err);
@@ -298,16 +322,34 @@ export class NeonRepository implements DataRepository {
     await this.initializeSchema();
     try {
       await this.pool.query(
-        `INSERT INTO printers (id, name, location, status, last_seen, api_key, job_count)
-         VALUES ($1, $2, $3, $4, $5, $6, $7)
+        `INSERT INTO printers (id, name, location, status, last_seen, api_key, job_count, queue_length, paper_status, toner_status, daemon_version, uptime)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
          ON CONFLICT (id) DO UPDATE 
          SET name = EXCLUDED.name, 
              location = EXCLUDED.location, 
              status = EXCLUDED.status, 
              last_seen = EXCLUDED.last_seen, 
              api_key = EXCLUDED.api_key, 
-             job_count = EXCLUDED.job_count`,
-        [printer.id, printer.name, printer.location, printer.status, printer.lastSeen, printer.apiKey, printer.jobCount]
+             job_count = EXCLUDED.job_count,
+             queue_length = EXCLUDED.queue_length,
+             paper_status = EXCLUDED.paper_status,
+             toner_status = EXCLUDED.toner_status,
+             daemon_version = EXCLUDED.daemon_version,
+             uptime = EXCLUDED.uptime`,
+        [
+          printer.id, 
+          printer.name, 
+          printer.location, 
+          printer.status, 
+          printer.lastSeen, 
+          printer.apiKey, 
+          printer.jobCount,
+          printer.queueLength || 0,
+          printer.paperStatus || 'unknown',
+          printer.tonerStatus || 'unknown',
+          printer.daemonVersion || null,
+          printer.uptime !== undefined ? printer.uptime : null
+        ]
       );
     } catch (err) {
       console.error(`NeonRepository: savePrinter ${printer.id} failed`, err);
