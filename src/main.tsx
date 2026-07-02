@@ -5,7 +5,7 @@ import './index.css';
 
 // Global fetch interceptor to support Bearer Token fallback in iframe / cookie-less environments
 const originalFetch = window.fetch;
-window.fetch = async function (input: RequestInfo | URL, init?: RequestInit) {
+const customFetch = async function (input: RequestInfo | URL, init?: RequestInit) {
   const token = localStorage.getItem("print_auth_token");
   let url = "";
   if (typeof input === "string") {
@@ -27,6 +27,22 @@ window.fetch = async function (input: RequestInfo | URL, init?: RequestInit) {
   }
   return originalFetch(input, init);
 };
+
+try {
+  Object.defineProperty(window, 'fetch', {
+    value: customFetch,
+    configurable: true,
+    writable: true,
+    enumerable: true
+  });
+} catch (e) {
+  console.warn("Could not override window.fetch using Object.defineProperty, trying direct assignment:", e);
+  try {
+    (window as any).fetch = customFetch;
+  } catch (err) {
+    console.error("Critical: Global fetch interceptor failed to initialize:", err);
+  }
+}
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>

@@ -6,11 +6,9 @@ import session from "express-session";
 import crypto from "crypto";
 import { createServer as createViteServer } from "vite";
 import { PrintJob, Printer, User, AuditLogEntry } from "./src/types";
-import { FirebaseFileStorage } from "./src/storage/firebaseStorage";
 import { LocalFileStorage } from "./src/storage/localStorage";
 import { FileStorage } from "./src/storage/storage";
-import { DataRepository, LocalJSONRepository, FirestoreRepository } from "./src/db/repository";
-import * as admin from "firebase-admin";
+import { DataRepository, LocalJSONRepository, NeonRepository } from "./src/db/repository.ts";
 
 // 1. Structured Logging Setup
 const logger = {
@@ -32,57 +30,16 @@ const logger = {
   }
 };
 
-// 2. Dynamic Firebase Settings Loader
-function getFirebaseConfig() {
-  const configPath = path.join(process.cwd(), "firebase-applet-config.json");
-  if (fs.existsSync(configPath)) {
-    try {
-      const config = JSON.parse(fs.readFileSync(configPath, "utf-8"));
-      return {
-        projectId: config.projectId,
-        storageBucket: config.storageBucket,
-        firestoreDatabaseId: config.firestoreDatabaseId
-      };
-    } catch (err) {
-      logger.error("Error reading firebase-applet-config.json file", err);
-    }
-  }
-  return {
-    projectId: process.env.FIREBASE_PROJECT_ID,
-    storageBucket: process.env.FIREBASE_STORAGE_BUCKET,
-    firestoreDatabaseId: process.env.FIREBASE_DATABASE_ID
-  };
-}
-
-const firebaseConfig = getFirebaseConfig();
 let repository: DataRepository;
 let storage: FileStorage;
 
-const firebaseAdmin = admin as any;
-
-// 3. Initialize Firebase Admin SDK
-if (firebaseConfig.projectId) {
+// 2. Mount Swappable DB Repository (Neon DB or Local Backup)
+if (process.env.DATABASE_URL) {
   try {
-    if (!firebaseAdmin.apps?.length) {
-      firebaseAdmin.initializeApp({
-        projectId: firebaseConfig.projectId,
-        storageBucket: firebaseConfig.storageBucket || process.env.FIREBASE_STORAGE_BUCKET,
-        credential: firebaseAdmin.credential.applicationDefault()
-      });
-    }
-    logger.info("Firebase Admin SDK initialized successfully", { projectId: firebaseConfig.projectId });
+    repository = new NeonRepository(process.env.DATABASE_URL);
+    logger.info("Active DB Repository: Neon DB (PostgreSQL)");
   } catch (err) {
-    logger.error("Failed to initialize Firebase Admin SDK", err);
-  }
-}
-
-// 4. Mount Swappable DB Repository (Postgres, Firestore, or Local Backup)
-if (firebaseConfig.projectId && firebaseConfig.firestoreDatabaseId) {
-  try {
-    repository = new FirestoreRepository(firebaseConfig.firestoreDatabaseId);
-    logger.info("Active DB Repository: Google Cloud Firestore", { databaseId: firebaseConfig.firestoreDatabaseId });
-  } catch (err) {
-    logger.warn("Failed to initialize Firestore Repository. Falling back to LocalJSONRepository.", { error: err });
+    logger.warn("Failed to initialize Neon Repository. Falling back to LocalJSONRepository.", { error: err });
     repository = new LocalJSONRepository();
   }
 } else {
@@ -90,19 +47,9 @@ if (firebaseConfig.projectId && firebaseConfig.firestoreDatabaseId) {
   logger.info("Active DB Repository: LocalJSONRepository (print_store.json fallback)");
 }
 
-// 5. Mount Swappable File Storage (S3, Firebase, or Local)
-if (firebaseConfig.projectId && firebaseConfig.storageBucket) {
-  try {
-    storage = new FirebaseFileStorage();
-    logger.info("Active File Storage: Firebase Cloud Storage", { bucket: firebaseConfig.storageBucket });
-  } catch (err) {
-    logger.warn("Failed to initialize Firebase Cloud Storage. Falling back to LocalFileStorage.", { error: err });
-    storage = new LocalFileStorage();
-  }
-} else {
-  storage = new LocalFileStorage();
-  logger.info("Active File Storage: LocalFileStorage (./uploads fallback)");
-}
+// 3. Mount Swappable File Storage (Local Storage fallback)
+storage = new LocalFileStorage();
+logger.info("Active File Storage: LocalFileStorage (./uploads)");
 
 const TOKEN_SECRET = "print-token-secret-xyz-987";
 
@@ -234,8 +181,8 @@ async function startServer() {
       res.json({
         status: "healthy",
         timestamp: new Date().toISOString(),
-        database: repository instanceof FirestoreRepository ? "Firestore" : "LocalJSON",
-        storage: storage instanceof FirebaseFileStorage ? "FirebaseStorage" : "LocalStorage",
+        database: repository instanceof NeonRepository ? "NeonDB" : "LocalJSON",
+        storage: "LocalStorage",
         uptime: process.uptime(),
         metrics: {
           totalPrinters: printers.length,
