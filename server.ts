@@ -1,9 +1,11 @@
+import "dotenv/config";
 import express from "express";
 import path from "path";
 import fs from "fs";
 import cookieParser from "cookie-parser";
 import session from "express-session";
 import crypto from "crypto";
+import bcrypt from "bcryptjs";
 import { createServer as createViteServer } from "vite";
 import { PrintJob, Printer, User, AuditLogEntry } from "./src/types";
 import { LocalFileStorage } from "./src/storage/localStorage";
@@ -52,6 +54,64 @@ storage = new LocalFileStorage();
 logger.info("Active File Storage: LocalFileStorage (./uploads)");
 
 const TOKEN_SECRET = "print-token-secret-xyz-987";
+const BCRYPT_ROUNDS = 10;
+const BCRYPT_HASH_PATTERN = /^\$2[aby]\$/;
+
+function isBcryptHash(value: string) {
+  return BCRYPT_HASH_PATTERN.test(value);
+}
+
+async function hashPassword(password: string) {
+  return bcrypt.hash(password, BCRYPT_ROUNDS);
+}
+
+async function verifyPassword(password: string, storedPassword: string) {
+  if (!storedPassword) return false;
+  if (isBcryptHash(storedPassword)) {
+    return bcrypt.compare(password, storedPassword);
+  }
+  return password === storedPassword;
+}
+
+async function upgradeLegacyPasswords() {
+  try {
+    const users = await repository.getUsers();
+    for (const user of users) {
+      if (!isBcryptHash(user.password)) {
+        await repository.saveUser({
+          ...user,
+          password: await hashPassword(user.password),
+        });
+        logger.info(`Upgraded stored password hash for user ${user.mobile}`);
+      }
+    }
+  } catch (err) {
+    logger.error("Failed to upgrade legacy password records", err);
+  }
+}
+
+async function bootstrapInitialAdminFromEnvIfNeeded() {
+  const users = await repository.getUsers();
+  if (users.length > 0) {
+    return { bootstrapped: false, needsSetup: false, hasUsers: true };
+  }
+
+  const adminMobile = process.env.ADMIN_MOBILE?.trim();
+  const adminPassword = process.env.ADMIN_PASSWORD;
+
+  if (!adminMobile || !adminPassword) {
+    return { bootstrapped: false, needsSetup: true, hasUsers: false };
+  }
+
+  await repository.saveUser({
+    mobile: adminMobile,
+    password: await hashPassword(adminPassword),
+    role: "admin",
+  });
+
+  logger.info(`Created initial administrator from environment bootstrap`, { mobile: adminMobile });
+  return { bootstrapped: true, needsSetup: false, hasUsers: true };
+}
 
 function generateToken(user: { mobile: string; role: string }) {
   const payload = JSON.stringify({ mobile: user.mobile, role: user.role });
@@ -106,6 +166,9 @@ async function startServer() {
       repository = new LocalJSONRepository();
     }
   }
+
+  await bootstrapInitialAdminFromEnvIfNeeded();
+  await upgradeLegacyPasswords();
 
   // Rate Limiting Middleware
   const rateLimitMap = new Map<string, { count: number; resetTime: number }>();
@@ -226,16 +289,79 @@ async function startServer() {
   });
 
   // --- AUTHENTICATION ENDPOINTS ---
+  app.get("/api/setup/status", async (req, res) => {
+    try {
+      const state = await bootstrapInitialAdminFromEnvIfNeeded();
+      res.json({
+        hasUsers: state.hasUsers,
+        needsSetup: state.needsSetup,
+        canBootstrapFromEnv: Boolean(process.env.ADMIN_MOBILE?.trim() && process.env.ADMIN_PASSWORD),
+      });
+    } catch (err) {
+      logger.error("Failed to resolve setup status", err);
+      res.status(500).json({ error: "Failed to resolve setup status" });
+    }
+  });
+
+  app.post("/api/setup/initialize", async (req: any, res: any) => {
+    const { mobile, password } = req.body;
+
+    if (!mobile || !password) {
+      return res.status(400).json({ error: "Mobile number and password are required" });
+    }
+
+    try {
+      const users = await repository.getUsers();
+      if (users.length > 0) {
+        return res.status(409).json({ error: "Setup has already been completed" });
+      }
+
+      const newAdmin: User = {
+        mobile: String(mobile).trim(),
+        password: await hashPassword(password),
+        role: "admin",
+      };
+
+      await repository.saveUser(newAdmin);
+
+      const sessionUser = { mobile: newAdmin.mobile, role: newAdmin.role };
+      req.session.user = sessionUser;
+      const token = generateToken(sessionUser);
+
+      req.session.save((err) => {
+        if (err) {
+          logger.error("Failed to persist setup session", err);
+          return res.status(500).json({ error: "Administrator created but session could not be saved" });
+        }
+        res.status(201).json({ success: true, user: sessionUser, token });
+      });
+    } catch (err) {
+      logger.error("Failed to initialize first administrator", err);
+      res.status(500).json({ error: "Failed to initialize first administrator" });
+    }
+  });
+
   app.post("/api/login", async (req: any, res: any) => {
     const { mobile, password } = req.body;
     logger.info(`Login step 1: Received login request`, { mobile, hasPassword: !!password });
     try {
+      const setupState = await bootstrapInitialAdminFromEnvIfNeeded();
+      if (setupState.needsSetup) {
+        return res.status(409).json({ error: "Setup is required before logging in", needsSetup: true });
+      }
+
       const users = await repository.getUsers();
       logger.info(`Login step 2: Retrieved users from repository`, { count: users.length });
       
-      const user = users.find(u => u.mobile === mobile && u.password === password);
+      const user = users.find(u => u.mobile === mobile);
       
-      if (user) {
+      if (user && await verifyPassword(password, user.password)) {
+        if (!isBcryptHash(user.password)) {
+          await repository.saveUser({
+            ...user,
+            password: await hashPassword(password),
+          });
+        }
         logger.info(`Login step 3: Password verification succeeded. Saving session.`, { mobile, role: user.role });
         const sessionUser = { mobile: user.mobile, role: user.role || "employee" };
         req.session.user = sessionUser;
@@ -295,8 +421,8 @@ async function startServer() {
     }
     try {
       const newUser: User = {
-        mobile,
-        password,
+        mobile: String(mobile).trim(),
+        password: await hashPassword(password),
         role: role || "employee"
       };
       await repository.saveUser(newUser);
@@ -312,6 +438,8 @@ async function startServer() {
   app.use("/api", (req, res, next) => {
     const isPublic = req.path === "/login" || 
                      req.path === "/me" || 
+                     req.path === "/setup/status" ||
+                     req.path === "/setup/initialize" ||
                      req.path === "/printers/ping" || 
                      req.path.startsWith("/jobs/poll/") || 
                      req.path.endsWith("/download") || 
@@ -390,7 +518,7 @@ async function startServer() {
       const newPrinter: Printer = {
         id,
         name,
-        location: location || "Unknown Location",
+        location: location || "",
         status: "online",
         apiKey,
         jobCount: 0,
@@ -610,7 +738,7 @@ async function startServer() {
         pageRange: pageRange || "All",
         status: "pending",
         retryCount: 0,
-        userId: req.session?.user?.mobile || "anonymous",
+        userId: req.session?.user?.mobile,
         createdAt: new Date().toISOString(),
         updatedAt: new Date().toISOString(),
         auditLogs: [

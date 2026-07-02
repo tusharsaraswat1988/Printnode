@@ -101,11 +101,10 @@ export class LocalJSONRepository implements DataRepository {
 
   async getUsers(): Promise<User[]> {
     this.load();
-    if (this.users.length === 0) {
-      this.users = [{ mobile: "1234567890", password: "123456", role: "admin" }];
-      this.save();
-    }
-    return this.users;
+    return this.users.map((user) => ({
+      ...user,
+      role: user.role || "employee",
+    }));
   }
 
   async saveUser(user: User): Promise<void> {
@@ -197,15 +196,6 @@ export class NeonRepository implements DataRepository {
             password TEXT NOT NULL,
             role TEXT NOT NULL
           );
-        `);
-
-        // Insert default admin and employee users if they don't exist
-        await client.query(`
-          INSERT INTO users (mobile, password, role) 
-          VALUES 
-            ('1234567890', '123456', 'admin'),
-            ('9876543210', 'password123', 'employee')
-          ON CONFLICT (mobile) DO NOTHING;
         `);
 
         this.isInitialized = true;
@@ -440,11 +430,6 @@ export class NeonRepository implements DataRepository {
     await this.initializeSchema();
     try {
       const res = await this.pool.query("SELECT * FROM users");
-      if (res.rows.length === 0) {
-        const defaultUser: User = { mobile: "1234567890", password: "123456", role: "admin" };
-        await this.saveUser(defaultUser);
-        return [defaultUser];
-      }
       return res.rows.map(row => ({
         mobile: row.mobile,
         password: row.password,
@@ -452,7 +437,7 @@ export class NeonRepository implements DataRepository {
       }));
     } catch (err) {
       console.error("NeonRepository: getUsers failed", err);
-      return [{ mobile: "1234567890", password: "123456", role: "admin" }];
+      return [];
     }
   }
 

@@ -32,6 +32,7 @@ import WiredPCGuide from "./components/WiredPCGuide";
 import SystemStatusPanel from "./components/SystemStatusPanel";
 import SettingsPanel from "./components/SettingsPanel";
 import LoginPage from "./components/LoginPage";
+import SetupWizard from "./components/SetupWizard";
 
 export default function App() {
   const [printers, setPrinters] = useState<Printer[]>([]);
@@ -44,6 +45,7 @@ export default function App() {
   >("print");
   
   const [user, setUser] = useState<{ mobile: string; role: "admin" | "employee" } | null>(null);
+  const [setupRequired, setSetupRequired] = useState(false);
   const [loading, setLoading] = useState(true);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
 
@@ -60,13 +62,30 @@ export default function App() {
 
   // Check login status
   useEffect(() => {
-    fetch("/api/me", { credentials: 'include' })
-      .then(res => res.json())
-      .then(data => {
-        setUser(data.user);
+    const bootstrap = async () => {
+      try {
+        const setupRes = await fetch("/api/setup/status", { credentials: "include" });
+        if (setupRes.ok) {
+          const setupData = await setupRes.json();
+          setSetupRequired(Boolean(setupData.needsSetup));
+          if (setupData.needsSetup) {
+            setUser(null);
+            setLoading(false);
+            return;
+          }
+        }
+
+        const meRes = await fetch("/api/me", { credentials: "include" });
+        const meData = await meRes.json();
+        setUser(meData.user);
+      } catch (err) {
+        setUser(null);
+      } finally {
         setLoading(false);
-      })
-      .catch(() => setLoading(false));
+      }
+    };
+
+    bootstrap();
   }, []);
 
   // Fetch all printers
@@ -142,6 +161,9 @@ export default function App() {
   }
 
   if (!user) {
+    if (setupRequired) {
+      return <SetupWizard onComplete={() => window.location.reload()} />;
+    }
     return <LoginPage onLogin={() => window.location.reload()} />;
   }
 
