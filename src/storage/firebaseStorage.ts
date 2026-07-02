@@ -1,18 +1,19 @@
-import * as admin from 'firebase-admin';
+import * as admin from "firebase-admin";
 import { FileStorage } from './storage';
 import { Readable } from 'stream';
 
 export class FirebaseFileStorage implements FileStorage {
-  private bucket: admin.storage.Bucket;
+  private bucket: any;
 
   constructor() {
-    if (!admin.apps.length) {
-      admin.initializeApp({
-        credential: admin.credential.applicationDefault(),
-        storageBucket: process.env.FIREBASE_STORAGE_BUCKET // You need to ensure this is set
+    const firebaseAdmin = admin as any;
+    if (!firebaseAdmin.apps?.length) {
+      firebaseAdmin.initializeApp({
+        credential: firebaseAdmin.credential.applicationDefault(),
+        storageBucket: process.env.FIREBASE_STORAGE_BUCKET
       });
     }
-    this.bucket = admin.storage().bucket();
+    this.bucket = firebaseAdmin.storage().bucket();
   }
 
   async save(id: string, data: Buffer): Promise<void> {

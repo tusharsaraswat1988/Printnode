@@ -18,6 +18,10 @@ export default function LoginPage({ onLogin }: { onLogin: () => void }) {
         credentials: 'include',
       });
       if (res.ok) {
+        const data = await res.json();
+        if (data.token) {
+          localStorage.setItem("print_auth_token", data.token);
+        }
         onLogin();
       } else {
         setError("Invalid mobile number or password");
@@ -53,7 +57,8 @@ export default function LoginPage({ onLogin }: { onLogin: () => void }) {
           <button 
             type="submit" 
             disabled={isLoading}
-            className={`w-full bg-indigo-600 text-white py-3 rounded-xl text-sm font-bold hover:bg-indigo-700 transition-colors ${isLoading ? "opacity-50 cursor-not-allowed" : ""}`}
+            id="login-submit-btn"
+            className={`w-full bg-indigo-600 text-white py-3 rounded-xl text-sm font-bold hover:bg-indigo-700 active:scale-[0.98] focus:ring-2 focus:ring-indigo-500 focus:ring-offset-2 transition-all shadow-md shadow-indigo-100 flex items-center justify-center ${isLoading ? "opacity-50 cursor-not-allowed" : ""}`}
           >
             {isLoading ? "Logging in..." : "Login"}
           </button>

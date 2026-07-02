@@ -8,6 +8,7 @@ const http = require('http');
 const https = require('https');
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 const { exec } = require('child_process');
 
 // Parse Arguments
@@ -122,10 +123,8 @@ function printFileNative(filePath) {
     let command = '';
 
     if (platform === 'win32') {
-      // Windows: use PowerShell to print
       command = `powershell.exe -Command "Start-Process -FilePath '${filePath}' -Verb Print"`;
     } else if (platform === 'darwin' || platform === 'linux') {
-      // macOS / Linux: use standard lp command
       command = `lp "${filePath}"`;
     } else {
       return reject(new Error(`Unsupported OS platform: ${platform}`));
@@ -177,6 +176,20 @@ async function pollQueue() {
       const localFilePath = path.join(TEMP_DIR, job.fileName);
       await downloadFile(downloadUrl, localFilePath);
       console.log(`-> Downloaded to: ${localFilePath}`);
+
+      // B2. Verify SHA-256 Checksum Integrity
+      if (job.sha256) {
+        console.log("-> Verifying file integrity checksum (SHA-256)...");
+        const fileBuffer = fs.readFileSync(localFilePath);
+        const localHash = crypto.createHash('sha256').update(fileBuffer).digest('hex');
+        if (localHash !== job.sha256) {
+          console.error(`-> Checksum mismatch! Expected: ${job.sha256}, Got: ${localHash}`);
+          await updateJobStatus(job.id, 'failed', 'Integrity check failed: checksum mismatch (SHA-256).');
+          try { fs.unlinkSync(localFilePath); } catch (e) {}
+          return;
+        }
+        console.log("-> Checksum matches perfectly! Payload is clean and verified.");
+      }
 
       // C. Set status to Printing
       console.log(`-> Spooling to printer...`);

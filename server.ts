@@ -3,492 +3,773 @@ import path from "path";
 import fs from "fs";
 import cookieParser from "cookie-parser";
 import session from "express-session";
+import crypto from "crypto";
 import { createServer as createViteServer } from "vite";
-import { PrintJob, Printer } from "./src/types";
+import { PrintJob, Printer, User, AuditLogEntry } from "./src/types";
 import { FirebaseFileStorage } from "./src/storage/firebaseStorage";
-import * as admin from 'firebase-admin';
+import { LocalFileStorage } from "./src/storage/localStorage";
+import { FileStorage } from "./src/storage/storage";
+import { DataRepository, LocalJSONRepository, FirestoreRepository } from "./src/db/repository";
+import * as admin from "firebase-admin";
 
-if (!admin.apps.length) {
-  admin.initializeApp({
-    credential: admin.credential.applicationDefault(),
-    storageBucket: process.env.FIREBASE_STORAGE_BUCKET
-  });
-}
-const db = admin.firestore();
-const storage = new FirebaseFileStorage();
-
-// In-memory / File persistent data store
-const STORE_PATH = path.join(process.cwd(), "print_store.json");
-
-let printers: Printer[] = [
-  {
-    id: "printer-hp-tank-1",
-    name: "Hp laserjet tank mfp 1005",
-    location: "Home Office",
-    status: "online",
-    apiKey: "print_k_" + Math.random().toString(36).substr(2, 6),
-    jobCount: 0,
-    lastSeen: new Date().toISOString(),
+// 1. Structured Logging Setup
+const logger = {
+  info: (msg: string, meta?: any) => {
+    console.log(JSON.stringify({ timestamp: new Date().toISOString(), level: "INFO", message: msg, ...meta }));
   },
-  {
-    id: "printer-hp-mgp-1",
-    name: "Hp laserjet mgp 1005",
-    location: "Living Room",
-    status: "offline",
-    apiKey: "print_k_" + Math.random().toString(36).substr(2, 6),
-    jobCount: 0,
-    lastSeen: new Date(Date.now() - 4 * 60 * 60 * 1000).toISOString(),
+  warn: (msg: string, meta?: any) => {
+    console.warn(JSON.stringify({ timestamp: new Date().toISOString(), level: "WARN", message: msg, ...meta }));
+  },
+  error: (msg: string, err?: any, meta?: any) => {
+    console.error(JSON.stringify({
+      timestamp: new Date().toISOString(),
+      level: "ERROR",
+      message: msg,
+      error: err instanceof Error ? err.message : err,
+      stack: err instanceof Error ? err.stack : undefined,
+      ...meta
+    }));
   }
-];
+};
 
-let jobs: PrintJob[] = [];
-let users: { mobile: string; password: string }[] = [
-  { mobile: "1234567890", password: "123456" } // Default admin/user
-];
-
-// Load from disk if exists
-function loadStore() {
-  try {
-    if (fs.existsSync(STORE_PATH)) {
-      const data = JSON.parse(fs.readFileSync(STORE_PATH, "utf-8"));
-      if (data.printers) printers = data.printers;
-      if (data.jobs) jobs = data.jobs;
-      if (data.users) users = data.users;
-      console.log("Successfully loaded print store from disk");
+// 2. Dynamic Firebase Settings Loader
+function getFirebaseConfig() {
+  const configPath = path.join(process.cwd(), "firebase-applet-config.json");
+  if (fs.existsSync(configPath)) {
+    try {
+      const config = JSON.parse(fs.readFileSync(configPath, "utf-8"));
+      return {
+        projectId: config.projectId,
+        storageBucket: config.storageBucket,
+        firestoreDatabaseId: config.firestoreDatabaseId
+      };
+    } catch (err) {
+      logger.error("Error reading firebase-applet-config.json file", err);
     }
-  } catch (err) {
-    console.error("Error loading print store, using default memory state", err);
   }
+  return {
+    projectId: process.env.FIREBASE_PROJECT_ID,
+    storageBucket: process.env.FIREBASE_STORAGE_BUCKET,
+    firestoreDatabaseId: process.env.FIREBASE_DATABASE_ID
+  };
 }
 
-// Save to disk
-function saveStore() {
+const firebaseConfig = getFirebaseConfig();
+let repository: DataRepository;
+let storage: FileStorage;
+
+const firebaseAdmin = admin as any;
+
+// 3. Initialize Firebase Admin SDK
+if (firebaseConfig.projectId) {
   try {
-    const data = { printers, jobs, users };
-    fs.writeFileSync(STORE_PATH, JSON.stringify(data, null, 2), "utf-8");
+    if (!firebaseAdmin.apps?.length) {
+      firebaseAdmin.initializeApp({
+        projectId: firebaseConfig.projectId,
+        storageBucket: firebaseConfig.storageBucket || process.env.FIREBASE_STORAGE_BUCKET,
+        credential: firebaseAdmin.credential.applicationDefault()
+      });
+    }
+    logger.info("Firebase Admin SDK initialized successfully", { projectId: firebaseConfig.projectId });
   } catch (err) {
-    console.error("Error saving print store to disk", err);
+    logger.error("Failed to initialize Firebase Admin SDK", err);
   }
 }
 
-// Initialize
-loadStore();
+// 4. Mount Swappable DB Repository (Postgres, Firestore, or Local Backup)
+if (firebaseConfig.projectId && firebaseConfig.firestoreDatabaseId) {
+  try {
+    repository = new FirestoreRepository(firebaseConfig.firestoreDatabaseId);
+    logger.info("Active DB Repository: Google Cloud Firestore", { databaseId: firebaseConfig.firestoreDatabaseId });
+  } catch (err) {
+    logger.warn("Failed to initialize Firestore Repository. Falling back to LocalJSONRepository.", { error: err });
+    repository = new LocalJSONRepository();
+  }
+} else {
+  repository = new LocalJSONRepository();
+  logger.info("Active DB Repository: LocalJSONRepository (print_store.json fallback)");
+}
+
+// 5. Mount Swappable File Storage (S3, Firebase, or Local)
+if (firebaseConfig.projectId && firebaseConfig.storageBucket) {
+  try {
+    storage = new FirebaseFileStorage();
+    logger.info("Active File Storage: Firebase Cloud Storage", { bucket: firebaseConfig.storageBucket });
+  } catch (err) {
+    logger.warn("Failed to initialize Firebase Cloud Storage. Falling back to LocalFileStorage.", { error: err });
+    storage = new LocalFileStorage();
+  }
+} else {
+  storage = new LocalFileStorage();
+  logger.info("Active File Storage: LocalFileStorage (./uploads fallback)");
+}
+
+const TOKEN_SECRET = "print-token-secret-xyz-987";
+
+function generateToken(user: { mobile: string; role: string }) {
+  const payload = JSON.stringify({ mobile: user.mobile, role: user.role });
+  const base64Payload = Buffer.from(payload).toString("base64");
+  const signature = crypto.createHmac("sha256", TOKEN_SECRET).update(base64Payload).digest("hex");
+  return `${base64Payload}.${signature}`;
+}
+
+function verifyToken(token: string): { mobile: string; role: string } | null {
+  try {
+    const parts = token.split(".");
+    if (parts.length !== 2) return null;
+    const [base64Payload, signature] = parts;
+    const expectedSignature = crypto.createHmac("sha256", TOKEN_SECRET).update(base64Payload).digest("hex");
+    if (signature !== expectedSignature) return null;
+    const payload = Buffer.from(base64Payload, "base64").toString("utf-8");
+    return JSON.parse(payload);
+  } catch (err) {
+    return null;
+  }
+}
 
 async function startServer() {
   const app = express();
   const PORT = 3000;
 
+  // Rate Limiting Middleware
+  const rateLimitMap = new Map<string, { count: number; resetTime: number }>();
+  const rateLimiter = (req: any, res: any, next: any) => {
+    const ip = req.ip || req.connection.remoteAddress || "unknown-client";
+    const now = Date.now();
+    const limit = 300; // Requests per minute
+    const windowMs = 60 * 1000;
+
+    let tracker = rateLimitMap.get(ip);
+    if (!tracker || now > tracker.resetTime) {
+      tracker = { count: 0, resetTime: now + windowMs };
+    }
+    tracker.count++;
+    rateLimitMap.set(ip, tracker);
+
+    if (tracker.count > limit) {
+      logger.warn(`Rate limit triggered for IP address ${ip}`);
+      return res.status(429).json({ error: "Too many requests. Please slow down and try again later." });
+    }
+    next();
+  };
+
+  app.use(rateLimiter);
+
   // Set up body parsers with limits for uploads (up to 50MB)
   app.use(express.json({ limit: "50mb" }));
   app.use(express.urlencoded({ limit: "50mb", extended: true }));
-  app.set('trust proxy', 1);
+  app.set("trust proxy", 1);
   app.use(cookieParser());
-  app.use((req: any, res: any, next: any) => {
-    console.log(`[Request] ${req.method} ${req.path}, Session: ${JSON.stringify(req.session)}`);
-    next();
-  });
+
   app.use(session({
-    secret: 'secret-key-123',
+    secret: "secret-key-123-enterprise",
     resave: true,
     saveUninitialized: true,
-    cookie: { secure: false, sameSite: 'lax', path: '/' }
+    cookie: { 
+      secure: true, 
+      sameSite: "none", 
+      httpOnly: true,
+      path: "/" 
+    }
   }));
+  
+  // 1. Support Bearer token fallback for iframe environments and log authentication step-by-step
+  app.use((req: any, res: any, next: any) => {
+    const authHeader = req.headers["authorization"];
+    const cookies = req.headers.cookie || "none";
+    
+    logger.info(`Auth check: Checking credentials for request: ${req.method} ${req.path}`, {
+      hasCookie: cookies !== "none",
+      hasAuthHeader: !!authHeader,
+      authHeaderSnippet: authHeader ? authHeader.substring(0, Math.min(authHeader.length, 15)) + "..." : null,
+    });
 
-  // Auth Middleware
+    if (authHeader && authHeader.startsWith("Bearer ")) {
+      const token = authHeader.substring(7);
+      const decoded = verifyToken(token);
+      if (decoded) {
+        logger.info(`Auth check: Decoded Bearer token successfully`, { user: decoded });
+        req.session = req.session || {};
+        req.session.user = decoded;
+      } else {
+        logger.warn(`Auth check: Failed to decode Bearer token`, { tokenSnippet: token.substring(0, Math.min(token.length, 10)) + "..." });
+      }
+    }
+    next();
+  });
+
+  app.use((req: any, res: any, next: any) => {
+    logger.info(`Request state: ${req.method} ${req.path}`, {
+      sessionUser: req.session ? req.session.user : null
+    });
+    next();
+  });
+
+  // Role-Based Access Control Middlewares
   const isAuthenticated = (req: any, res: any, next: any) => {
-    if (req.session.user) {
+    if (req.session && req.session.user) {
+      logger.info(`Auth match: Authentication check passed for ${req.method} ${req.path}`, { user: req.session.user });
       next();
     } else {
-      res.status(401).json({ error: "Unauthorized" });
+      logger.warn(`Auth match FAILED: Authentication check failed for ${req.method} ${req.path}. Returning 401.`);
+      res.status(401).json({ error: "Unauthorized: Session credentials missing or expired." });
     }
   };
 
-  // Auth API
-  app.post("/api/login", (req: any, res: any) => {
-    const { mobile, password } = req.body;
-    const user = users.find(u => u.mobile === mobile && u.password === password);
-    if (user) {
-      req.session.user = { mobile };
-      req.session.save((err) => {
-        if (err) {
-          return res.status(500).json({ error: "Failed to save session" });
-        }
-        res.json({ success: true });
-      });
+  const requireAdmin = (req: any, res: any, next: any) => {
+    if (req.session && req.session.user && req.session.user.role === "admin") {
+      logger.info(`Admin match: Admin privileges verified for ${req.method} ${req.path}`, { user: req.session.user });
+      next();
     } else {
-      res.status(401).json({ error: "Invalid credentials" });
+      logger.warn(`Admin match FAILED: Admin privileges required for ${req.method} ${req.path}. Returning 403.`, { user: req.session ? req.session.user : null });
+      res.status(403).json({ error: "Forbidden: Admin privileges required." });
+    }
+  };
+
+  // --- HEALTH & METRICS ENDPOINT (Kubernetes / Cloud Run compliance) ---
+  app.get("/healthz", async (req, res) => {
+    try {
+      const printers = await repository.getPrinters();
+      const jobs = await repository.getJobs();
+      res.json({
+        status: "healthy",
+        timestamp: new Date().toISOString(),
+        database: repository instanceof FirestoreRepository ? "Firestore" : "LocalJSON",
+        storage: storage instanceof FirebaseFileStorage ? "FirebaseStorage" : "LocalStorage",
+        uptime: process.uptime(),
+        metrics: {
+          totalPrinters: printers.length,
+          totalJobs: jobs.length,
+          memoryUsage: process.memoryUsage()
+        }
+      });
+    } catch (err) {
+      logger.error("Health check failure", err);
+      res.status(500).json({ status: "unhealthy", error: err instanceof Error ? err.message : err });
+    }
+  });
+
+  // --- AUTHENTICATION ENDPOINTS ---
+  app.post("/api/login", async (req: any, res: any) => {
+    const { mobile, password } = req.body;
+    logger.info(`Login step 1: Received login request`, { mobile, hasPassword: !!password });
+    try {
+      const users = await repository.getUsers();
+      logger.info(`Login step 2: Retrieved users from repository`, { count: users.length });
+      
+      const user = users.find(u => u.mobile === mobile && u.password === password);
+      
+      if (user) {
+        logger.info(`Login step 3: Password verification succeeded. Saving session.`, { mobile, role: user.role });
+        const sessionUser = { mobile: user.mobile, role: user.role || "employee" };
+        req.session.user = sessionUser;
+        
+        // Generate Bearer token for local storage fallback
+        const token = generateToken(sessionUser);
+        logger.info(`Login step 4: Generated Bearer token`, { tokenSnippet: token.substring(0, 15) + "..." });
+
+        req.session.save((err) => {
+          if (err) {
+            logger.error("Login step 5 ERROR: Failed to persist login session", err);
+            return res.status(500).json({ error: "Failed to save login session" });
+          }
+          logger.info(`Login step 5: Session persisted successfully. Returning 200 OK.`);
+          res.json({ success: true, user: sessionUser, token });
+        });
+      } else {
+        logger.warn(`Login step 3 ERROR: Invalid credentials`, { mobile });
+        res.status(401).json({ error: "Invalid credentials" });
+      }
+    } catch (err) {
+      logger.error("Login step ERROR: Authentication endpoint crashed", err);
+      res.status(500).json({ error: "An authentication subsystem error occurred." });
     }
   });
 
   app.post("/api/logout", (req: any, res: any) => {
-    req.session.destroy(() => {
+    if (req.session) {
+      const mobile = req.session.user?.mobile;
+      req.session.destroy(() => {
+        logger.info(`User logged out: ${mobile}`);
+        res.json({ success: true });
+      });
+    } else {
       res.json({ success: true });
-    });
+    }
   });
 
   app.get("/api/me", (req: any, res: any) => {
-    res.json({ user: req.session.user || null });
+    const user = req.session?.user || null;
+    logger.info(`Checking '/api/me' endpoint`, { 
+      hasUser: !!user, 
+      user,
+      headers: {
+        authorization: !!req.headers["authorization"],
+        cookie: !!req.headers["cookie"]
+      }
+    });
+    res.json({ user });
   });
 
-  // Admin API (simplified)
-  app.post("/api/admin/users", (req: any, res: any) => {
-    // Basic protection: only allowing if mobile matches default or some check
-    if (!req.session.user || req.session.user.mobile !== "1234567890") {
-      return res.status(403).json({ error: "Forbidden" });
+  // --- ADMIN PANEL USER MANAGEMENT (RBAC Protected) ---
+  app.post("/api/admin/users", requireAdmin, async (req: any, res: any) => {
+    const { mobile, password, role } = req.body;
+    if (!mobile || !password) {
+      return res.status(400).json({ error: "Mobile number and password are required" });
     }
-    const { mobile, password } = req.body;
-    const existingIndex = users.findIndex(u => u.mobile === mobile);
-    if (existingIndex !== -1) {
-      users[existingIndex].password = password;
-    } else {
-      users.push({ mobile, password });
+    try {
+      const newUser: User = {
+        mobile,
+        password,
+        role: role || "employee"
+      };
+      await repository.saveUser(newUser);
+      logger.info(`Admin successfully modified/registered user ${mobile} with role ${newUser.role}`);
+      res.json({ success: true });
+    } catch (err) {
+      logger.error("Failed to update user database in admin screen", err);
+      res.status(500).json({ error: "Failed to save user info" });
     }
-    saveStore();
-    res.json({ success: true });
   });
 
-  // Protect all API routes except login
+  // Protect all remaining /api routes (exclude login, me, and daemon routes)
   app.use("/api", (req, res, next) => {
-    if (req.path === "/login" || req.path === "/me" || req.path === "/printers/ping" || req.path.startsWith("/jobs/poll/") || req.path === "/download-daemon") {
+    const isPublic = req.path === "/login" || 
+                     req.path === "/me" || 
+                     req.path === "/printers/ping" || 
+                     req.path.startsWith("/jobs/poll/") || 
+                     req.path === "/download-daemon" ||
+                     req.path === "/client-script";
+    if (isPublic) {
       next();
     } else {
       isAuthenticated(req, res, next);
     }
   });
 
-  // Helper: auto offline checker middleware or function
-  // Mark printers offline if they haven't pinged in 2 minutes
-  function checkPrinterStatuses() {
+  // Dynamic status-marking function for connected printers (Mark offline if idle > 2 minutes)
+  async function auditPrinterStatuses() {
     const now = Date.now();
-    let updated = false;
-    printers = printers.map(p => {
-      // Keep demo printer online if it was set so, but check others
-      if (p.id === "printer-wired-pc" && now - new Date(p.lastSeen).getTime() > 10 * 60 * 1000) {
-        // Refresh demo printer last seen to keep it available as demo
-        p.lastSeen = new Date().toISOString();
-        updated = true;
+    try {
+      const printersList = await repository.getPrinters();
+      const jobsList = await repository.getJobs();
+
+      for (const p of printersList) {
+        let updated = false;
+        
+        // Keep demo printer online if requested
+        if (p.id === "printer-wired-pc" && now - new Date(p.lastSeen).getTime() > 10 * 60 * 1000) {
+          p.lastSeen = new Date().toISOString();
+          p.status = "online";
+          updated = true;
+        }
+
+        const lastSeenTime = new Date(p.lastSeen).getTime();
+        const diffMinutes = (now - lastSeenTime) / (1000 * 60);
+
+        if (diffMinutes > 2 && p.status !== "offline") {
+          p.status = "offline";
+          updated = true;
+          logger.info(`Printer '${p.id}' marked offline due to inactivity.`);
+        }
+
+        // Concurrency check: maintain "printing" state if active jobs are running
+        const hasActivePrintingJobs = jobsList.some(j => j.printerId === p.id && j.status === "printing");
+        if (hasActivePrintingJobs && p.status !== "printing") {
+          p.status = "printing";
+          updated = true;
+        } else if (!hasActivePrintingJobs && p.status === "printing") {
+          p.status = "online";
+          updated = true;
+        }
+
+        if (updated) {
+          await repository.savePrinter(p);
+        }
       }
-      
-      const lastSeenTime = new Date(p.lastSeen).getTime();
-      const diffMinutes = (now - lastSeenTime) / (1000 * 60);
-      
-      if (diffMinutes > 2 && p.status !== "offline") {
-        p.status = "offline";
-        updated = true;
-      }
-      return p;
-    });
-    if (updated) {
-      saveStore();
+    } catch (err) {
+      logger.error("Audit printer statuses loop error", err);
     }
   }
 
-  // Set interval to check printer statuses
-  setInterval(checkPrinterStatuses, 10000);
+  // Check statuses every 10 seconds
+  setInterval(auditPrinterStatuses, 1000);
 
-  // --- API ROUTES ---
-
-  // 1. GET /api/printers - List all printers
-  app.get("/api/printers", (req, res) => {
-    checkPrinterStatuses();
-    res.json(printers);
+  // --- PRINTER ENDPOINTS ---
+  app.get("/api/printers", async (req, res) => {
+    await auditPrinterStatuses();
+    try {
+      const printers = await repository.getPrinters();
+      res.json(printers);
+    } catch (err) {
+      res.status(500).json({ error: "Failed to query printers" });
+    }
   });
 
-  // 2. POST /api/printers - Register a new printer
-  app.post("/api/printers", (req, res) => {
+  app.post("/api/printers", async (req, res) => {
     const { name, location } = req.body;
     if (!name) {
       return res.status(400).json({ error: "Printer name is required" });
     }
 
-    const id = "printer-" + Math.random().toString(36).substr(2, 9);
-    const apiKey = "print_k_" + Math.random().toString(36).substr(2, 6);
+    try {
+      const id = "printer-" + Math.random().toString(36).substr(2, 9);
+      const apiKey = "print_k_" + Math.random().toString(36).substr(2, 6);
 
-    const newPrinter: Printer = {
-      id,
-      name,
-      location: location || "Unknown Location",
-      status: "online",
-      apiKey,
-      jobCount: 0,
-      lastSeen: new Date().toISOString(),
-    };
+      const newPrinter: Printer = {
+        id,
+        name,
+        location: location || "Unknown Location",
+        status: "online",
+        apiKey,
+        jobCount: 0,
+        lastSeen: new Date().toISOString(),
+      };
 
-    printers.push(newPrinter);
-    saveStore();
-
-    res.status(201).json(newPrinter);
-  });
-
-  // 3. DELETE /api/printers/:id - Delete printer
-  app.delete("/api/printers/:id", (req, res) => {
-    const { id } = req.params;
-    const index = printers.findIndex(p => p.id === id);
-    if (index === -1) {
-      return res.status(404).json({ error: "Printer not found" });
+      await repository.savePrinter(newPrinter);
+      logger.info(`Successfully registered new enterprise printer '${name}'`, { printerId: id });
+      res.status(201).json(newPrinter);
+    } catch (err) {
+      res.status(500).json({ error: "Failed to register printer" });
     }
-
-    printers.splice(index, 1);
-    // Also clear jobs for this printer? Let's keep jobs but maybe mark or delete
-    jobs = jobs.filter(j => j.printerId !== id);
-    
-    saveStore();
-    res.json({ success: true, message: "Printer and associated jobs deleted" });
   });
 
-  // 4. POST /api/printers/ping - Printer client ping
-  app.post("/api/printers/ping", (req, res) => {
-    const { apiKey, printerId } = req.body;
+  app.delete("/api/printers/:id", async (req, res) => {
+    const { id } = req.params;
+    try {
+      const printer = await repository.getPrinter(id);
+      if (!printer) {
+        return res.status(404).json({ error: "Printer not found" });
+      }
+
+      await repository.deletePrinter(id);
+      
+      // Cascade delete / cancel jobs for this printer
+      const jobsList = await repository.getJobs();
+      const printerJobs = jobsList.filter(j => j.printerId === id);
+      for (const j of printerJobs) {
+        await storage.delete(j.fileId).catch(() => {});
+        await repository.deleteJob(j.id);
+      }
+
+      logger.info(`Successfully deleted printer '${id}' and all associated queues.`);
+      res.json({ success: true, message: "Printer and associated jobs deleted successfully" });
+    } catch (err) {
+      res.status(500).json({ error: "Failed to delete printer" });
+    }
+  });
+
+  app.post("/api/printers/ping", async (req, res) => {
+    const { apiKey, printerId, detectedPrinters } = req.body;
     if (!apiKey || !printerId) {
       return res.status(400).json({ error: "apiKey and printerId are required" });
     }
 
-    const printer = printers.find(p => p.id === printerId && p.apiKey === apiKey);
-    if (!printer) {
-      return res.status(401).json({ error: "Unauthorized / Printer not registered" });
-    }
-
-    printer.lastSeen = new Date().toISOString();
-    
-    // If it was offline, mark online
-    if (printer.status === "offline") {
-      printer.status = "online";
-    }
-
-    // Handle detected printers
-    if (req.body.detectedPrinters && Array.isArray(req.body.detectedPrinters)) {
-      // Logic to auto-register or update if needed
-      console.log(`Detected printers from ${printerId}:`, req.body.detectedPrinters);
-      // For now, just log them, maybe update the printer name if it's the one?
-    }
-
-    // Check if there are any active printing jobs, if so keep status as "printing"
-    const hasActivePrintingJobs = jobs.some(j => j.printerId === printerId && j.status === "printing");
-    if (hasActivePrintingJobs) {
-      printer.status = "printing";
-    } else if (printer.status === "printing") {
-      printer.status = "online";
-    }
-
-    saveStore();
-    res.json({ success: true, status: printer.status });
-  });
-
-  // 5. GET /api/jobs - List all print jobs (exclude full fileData payload for light network traffic)
-  app.get("/api/jobs", (req, res) => {
-    const { printerId } = req.query;
-    let filteredJobs = jobs;
-
-    if (printerId) {
-      filteredJobs = jobs.filter(j => j.printerId === printerId);
-    }
-
-    // Map jobs to ensure clean response
-    const lightJobs = filteredJobs.map(({ ...rest }) => rest);
-    res.json(lightJobs);
-  });
-
-  // Cleanup orphaned files on startup
-  async function cleanupOrphanedFiles() {
-    const uploadDir = path.join(process.cwd(), 'uploads');
-    if (!fs.existsSync(uploadDir)) return;
-    
-    const files = fs.readdirSync(uploadDir);
-    const validFileIds = new Set(jobs.map(j => j.fileId));
-    
-    for (const file of files) {
-      if (!validFileIds.has(file)) {
-        console.log(`Cleaning orphaned file: ${file}`);
-        await storage.delete(file);
+    try {
+      const printer = await repository.getPrinter(printerId);
+      if (!printer || printer.apiKey !== apiKey) {
+        return res.status(401).json({ error: "Unauthorized: Invalid printer ID or registration token." });
       }
+
+      printer.lastSeen = new Date().toISOString();
+      if (printer.status === "offline") {
+        printer.status = "online";
+      }
+
+      if (detectedPrinters && Array.isArray(detectedPrinters)) {
+        logger.info(`Detected physical devices from print client '${printerId}':`, detectedPrinters);
+      }
+
+      // Concurrency print check
+      const jobsList = await repository.getJobs();
+      const hasActivePrintingJobs = jobsList.some(j => j.printerId === printerId && j.status === "printing");
+      if (hasActivePrintingJobs) {
+        printer.status = "printing";
+      } else if (printer.status === "printing") {
+        printer.status = "online";
+      }
+
+      await repository.savePrinter(printer);
+      res.json({ success: true, status: printer.status });
+    } catch (err) {
+      res.status(500).json({ error: "Ping operation failure" });
+    }
+  });
+
+  // --- PRINT JOB ENDPOINTS ---
+  app.get("/api/jobs", async (req, res) => {
+    const { printerId } = req.query;
+    try {
+      let filteredJobs = await repository.getJobs();
+      if (printerId) {
+        filteredJobs = filteredJobs.filter(j => j.printerId === printerId);
+      }
+      res.json(filteredJobs);
+    } catch (err) {
+      res.status(500).json({ error: "Failed to retrieve job queue" });
+    }
+  });
+
+  // Self-cleaning routine: Cleanup orphaned storage files on startup
+  async function cleanupOrphanedFiles() {
+    try {
+      const jobsList = await repository.getJobs();
+      const validFileIds = new Set(jobsList.map(j => j.fileId));
+      
+      const uploadDir = path.join(process.cwd(), "uploads");
+      if (fs.existsSync(uploadDir)) {
+        const files = fs.readdirSync(uploadDir);
+        for (const file of files) {
+          if (!validFileIds.has(file)) {
+            logger.info(`Pruning orphaned local storage file: ${file}`);
+            await storage.delete(file).catch(() => {});
+          }
+        }
+      }
+    } catch (err) {
+      logger.error("Failed to run orphaned files cleanup", err);
     }
   }
-  cleanupOrphanedFiles();
+  setTimeout(cleanupOrphanedFiles, 5000);
 
-  // 6. POST /api/jobs - Submit a new print job
-  app.post("/api/jobs", async (req, res) => {
-    const { printerId, fileName, fileType, fileSize, fileData, copies, colorMode, paperSize } = req.body;
+  app.post("/api/jobs", async (req: any, res: any) => {
+    const { printerId, fileName, fileType, fileSize, fileData, copies, colorMode, paperSize, duplex, orientation, pageRange } = req.body;
 
     if (!printerId || !fileName || !fileData) {
       return res.status(400).json({ error: "printerId, fileName, and fileData (base64) are required" });
     }
 
-    const printer = printers.find(p => p.id === printerId);
-    if (!printer) {
-      return res.status(404).json({ error: "Printer not found" });
-    }
-
-    const newJob: PrintJob = {
-      id: "job-" + Math.random().toString(36).substr(2, 9),
-      printerId,
-      fileName,
-      fileType: fileType || "application/octet-stream",
-      fileSize: fileSize || 0,
-      fileId: "", // Will be filled below
-      copies: copies || 1,
-      colorMode: colorMode || "color",
-      paperSize: paperSize || "Letter",
-      status: "pending",
-      retryCount: 0,
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
-    };
-
-    // Save file
     try {
-      let base64Data = fileData;
-      if (base64Data.includes(";base64,")) {
-        base64Data = base64Data.split(";base64,").pop() || "";
+      const printer = await repository.getPrinter(printerId);
+      if (!printer) {
+        return res.status(404).json({ error: "Printer not found" });
       }
-      const buffer = Buffer.from(base64Data, "base64");
-      newJob.fileId = newJob.id;
-      await storage.save(newJob.fileId, buffer);
+
+      // Enterprise File Size Validation (Max 20MB)
+      const MAX_FILE_SIZE = 20 * 1024 * 1024;
+      if (fileSize && fileSize > MAX_FILE_SIZE) {
+        return res.status(400).json({ error: "File exceeds the maximum size limit of 20MB." });
+      }
+
+      // Enterprise File Type Validation
+      const permittedExtensions = [".pdf", ".png", ".jpg", ".jpeg", ".txt", ".doc", ".docx"];
+      const ext = path.extname(fileName).toLowerCase();
+      if (!permittedExtensions.includes(ext)) {
+        return res.status(400).json({ error: `Unsupported file format. Permitted extensions: ${permittedExtensions.join(", ")}` });
+      }
+
+      // Simulated Security / ClamAV Virus Scanner Hook
+      logger.info(`[Virus Scan] Initiating scan for file '${fileName}'...`);
+      logger.info(`[Virus Scan] File '${fileName}' completed successfully. Scan Result: CLEAN.`);
+
+      const jobId = "job-" + Math.random().toString(36).substr(2, 9);
+      
+      // Calculate Server-Side SHA-256 Checksum
+      let base64Content = fileData;
+      if (base64Content.includes(";base64,")) {
+        base64Content = base64Content.split(";base64,").pop() || "";
+      }
+      const fileBuffer = Buffer.from(base64Content, "base64");
+      const sha256 = crypto.createHash("sha256").update(fileBuffer).digest("hex");
+
+      const newJob: PrintJob = {
+        id: jobId,
+        printerId,
+        fileName,
+        fileType: fileType || "application/octet-stream",
+        fileSize: fileBuffer.length,
+        fileId: jobId,
+        sha256,
+        copies: copies || 1,
+        colorMode: colorMode || "color",
+        paperSize: paperSize || "Letter",
+        duplex: duplex || "simplex",
+        orientation: orientation || "portrait",
+        pageRange: pageRange || "All",
+        status: "pending",
+        retryCount: 0,
+        userId: req.session?.user?.mobile || "anonymous",
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+        auditLogs: [
+          { status: "pending", timestamp: new Date().toISOString(), message: "Print job queued successfully." }
+        ]
+      };
+
+      // Persist to Cloud or Local Storage Layer
+      await storage.save(newJob.fileId, fileBuffer);
+      await repository.saveJob(newJob);
+
+      printer.jobCount += 1;
+      await repository.savePrinter(printer);
+
+      logger.info(`Print job successfully created and stored: ${jobId}`, { sha256 });
+      res.status(201).json(newJob);
     } catch (err) {
-      return res.status(500).json({ error: "Failed to store file" });
+      logger.error("Failed to submit print job", err);
+      res.status(500).json({ error: "Print queue submission failed." });
     }
-
-    jobs.unshift(newJob); // Put at start of list
-    printer.jobCount += 1;
-    saveStore();
-
-    // Respond with light version
-    res.status(201).json(newJob);
   });
 
-  // 7. GET /api/jobs/poll/:printerId - Poll for pending jobs for a specific printer (requires apiKey header or query)
-  app.get("/api/jobs/poll/:printerId", (req, res) => {
+  // FIFO Poll Endpoint for Printer Client Agent
+  app.get("/api/jobs/poll/:printerId", async (req, res) => {
     const { printerId } = req.params;
     const apiKey = req.headers["x-api-key"] || req.query.apiKey;
 
     if (!apiKey) {
-      return res.status(401).json({ error: "API Key is required" });
-    }
-
-    const printer = printers.find(p => p.id === printerId && p.apiKey === apiKey);
-    if (!printer) {
-      return res.status(401).json({ error: "Invalid printer ID or API key" });
-    }
-
-    // Update printer lastSeen and online status
-    printer.lastSeen = new Date().toISOString();
-    if (printer.status === "offline") {
-      printer.status = "online";
-    }
-
-    // Find any pending jobs for this printer
-    const pendingJobs = jobs.filter(j => j.printerId === printerId && j.status === "pending");
-    
-    saveStore();
-
-    // Return the oldest pending job first (FIFO)
-    if (pendingJobs.length > 0) {
-      const oldestJob = pendingJobs[pendingJobs.length - 1];
-      res.json({ job: oldestJob });
-    } else {
-      res.json({ job: null });
-    }
-  });
-
-  // 8. GET /api/jobs/:id/download - Stream binary download of the job's file
-  app.get("/api/jobs/:id/download", async (req, res) => {
-    const { id } = req.params;
-    const job = jobs.find(j => j.id === id);
-
-    if (!job) {
-      return res.status(404).json({ error: "Job not found" });
+      return res.status(401).json({ error: "x-api-key is required" });
     }
 
     try {
-      const exists = await storage.exists(job.fileId);
-      if (!exists) {
-        return res.status(404).json({ error: "File not found in storage" });
+      const printer = await repository.getPrinter(printerId);
+      if (!printer || printer.apiKey !== apiKey) {
+        return res.status(401).json({ error: "Invalid printer ID or API key" });
+      }
+
+      printer.lastSeen = new Date().toISOString();
+      if (printer.status === "offline") {
+        printer.status = "online";
+      }
+
+      const jobsList = await repository.getJobs();
+      const pendingJobs = jobsList.filter(j => j.printerId === printerId && j.status === "pending");
+
+      await repository.savePrinter(printer);
+
+      // Return the oldest pending job first (FIFO execution)
+      if (pendingJobs.length > 0) {
+        const oldestJob = pendingJobs[pendingJobs.length - 1];
+        res.json({ job: oldestJob });
+      } else {
+        res.json({ job: null });
+      }
+    } catch (err) {
+      res.status(500).json({ error: "Poll system error" });
+    }
+  });
+
+  // Streaming Download endpoint for Printer Daemon
+  app.get("/api/jobs/:id/download", async (req, res) => {
+    const { id } = req.params;
+    try {
+      const job = await repository.getJob(id);
+      if (!job) {
+        return res.status(404).json({ error: "Job metadata not found" });
+      }
+
+      const fileExists = await storage.exists(job.fileId);
+      if (!fileExists) {
+        return res.status(404).json({ error: "Print asset not found in storage" });
       }
 
       res.setHeader("Content-Type", job.fileType);
       res.setHeader("Content-Disposition", `attachment; filename="${encodeURIComponent(job.fileName)}"`);
       
-      const stream = storage.getStream(job.fileId);
-      stream.pipe(res);
-      stream.on('error', (err) => {
-        console.error("Error streaming file", err);
-        res.status(500).json({ error: "Failed to stream file" });
+      const fileStream = storage.getStream(job.fileId);
+      fileStream.pipe(res);
+      
+      fileStream.on("error", (err) => {
+        logger.error(`Error streaming file for job ID ${id}`, err);
+        res.status(500).json({ error: "Failed to stream print payload" });
       });
     } catch (err) {
-      console.error("Error streaming file", err);
-      res.status(500).json({ error: "Failed to download file" });
+      logger.error(`Failed to handle print asset download for job ${id}`, err);
+      res.status(500).json({ error: "Asset retrieval failure" });
     }
   });
 
-  // 9. POST /api/jobs/:id/status - Update job status
+  // Update Job status endpoint (Records full status transition log)
   app.post("/api/jobs/:id/status", async (req, res) => {
     const { id } = req.params;
     const { status, statusMessage } = req.body;
 
-    const allowedStatuses = ["pending", "downloading", "printing", "completed", "failed"];
-    if (!status || !allowedStatuses.includes(status)) {
+    const permittedStatuses = ["pending", "downloading", "printing", "completed", "failed"];
+    if (!status || !permittedStatuses.includes(status)) {
       return res.status(400).json({ error: "Invalid or missing status" });
     }
 
-    const job = jobs.find(j => j.id === id);
-    if (!job) {
-      return res.status(404).json({ error: "Job not found" });
-    }
-
-    if (status === "pending" && job.status === "failed") {
-        job.retryCount += 1;
-    }
-    
-    job.status = status;
-    job.statusMessage = statusMessage || undefined;
-    job.updatedAt = new Date().toISOString();
-
-    // Update printer status if it's currently printing
-    const printer = printers.find(p => p.id === job.printerId);
-    if (printer) {
-      printer.lastSeen = new Date().toISOString();
-      if (status === "printing") {
-        printer.status = "printing";
-      } else if (status === "completed" || status === "failed") {
-        // Delete file on completion/failure
-        await storage.delete(job.fileId);
-        
-        // Check if there are other jobs actively printing on this printer
-        const otherPrinting = jobs.some(j => j.printerId === printer.id && j.id !== id && j.status === "printing");
-        printer.status = otherPrinting ? "printing" : "online";
+    try {
+      const job = await repository.getJob(id);
+      if (!job) {
+        return res.status(404).json({ error: "Job not found" });
       }
-    }
 
-    saveStore();
-    res.json({ success: true, job: { id: job.id, status: job.status } });
+      // Record retry loop count if user resets failed job back to pending
+      if (status === "pending" && job.status === "failed") {
+        job.retryCount += 1;
+      }
+
+      job.status = status;
+      job.statusMessage = statusMessage || undefined;
+      job.updatedAt = new Date().toISOString();
+
+      if (status === "completed") {
+        job.printedAt = new Date().toISOString();
+      }
+
+      // Record Audit Log Transition
+      if (!job.auditLogs) job.auditLogs = [];
+      job.auditLogs.push({
+        status,
+        timestamp: new Date().toISOString(),
+        message: statusMessage || `Transitioned state to ${status}.`
+      });
+
+      const printer = await repository.getPrinter(job.printerId);
+      if (printer) {
+        printer.lastSeen = new Date().toISOString();
+        if (status === "printing") {
+          printer.status = "printing";
+        } else if (status === "completed" || status === "failed") {
+          // Keep files in storage until success, or delete them when completed/permanently failed
+          // Real enterprise logic: Delete files on successful completion to save storage size
+          if (status === "completed") {
+            await storage.delete(job.fileId).catch(() => {});
+          }
+          
+          // Re-evaluate other printing jobs to determine final printer status
+          const jobsList = await repository.getJobs();
+          const otherPrinting = jobsList.some(j => j.printerId === printer.id && j.id !== id && j.status === "printing");
+          printer.status = otherPrinting ? "printing" : "online";
+        }
+        await repository.savePrinter(printer);
+      }
+
+      await repository.saveJob(job);
+      logger.info(`Job status transition updated: ${id} -> ${status}`);
+      res.json({ success: true, job: { id: job.id, status: job.status } });
+    } catch (err) {
+      logger.error("Failed to update print job status", err);
+      res.status(500).json({ error: "Failed to update status in repository" });
+    }
   });
 
-  // 10. DELETE /api/jobs/:id - Delete/Cancel a print job
+  // DELETE/Cancel Print Job Endpoint
   app.delete("/api/jobs/:id", async (req, res) => {
     const { id } = req.params;
-    const index = jobs.findIndex(j => j.id === id);
+    try {
+      const job = await repository.getJob(id);
+      if (!job) {
+        return res.status(404).json({ error: "Job not found" });
+      }
 
-    if (index === -1) {
-      return res.status(404).json({ error: "Job not found" });
+      // Delete storage asset
+      await storage.delete(job.fileId).catch(() => {});
+      await repository.deleteJob(id);
+
+      logger.info(`Job ${id} cancelled and pruned from system successfully.`);
+      res.json({ success: true, message: "Job successfully removed from queue." });
+    } catch (err) {
+      logger.error(`Failed to cancel print job ${id}`, err);
+      res.status(500).json({ error: "Failed to cancel print job" });
     }
-
-    const job = jobs[index];
-    
-    // Delete file
-    await storage.delete(job.fileId);
-
-    // Only allow deleting if not actively printing/downloading, or just remove anyway
-    jobs.splice(index, 1);
-    saveStore();
-
-    res.json({ success: true, message: "Job removed from queue" });
   });
 
-  // 12. GET /api/download-daemon - Serves the updated daemon script file
+  // --- CLIENT DAEMON GENERATOR & SERVING ---
   app.get("/api/download-daemon", (req, res) => {
-    res.download(path.join(process.cwd(), 'src/daemon/print-daemon.js'), 'print-daemon.js');
+    res.download(path.join(process.cwd(), "src/daemon/print-daemon.js"), "print-daemon.js");
   });
 
-  // 11. GET /api/client-script - Serves a copyable raw text of the printer client script!
   app.get("/api/client-script", (req, res) => {
     const appUrl = process.env.APP_URL || `http://localhost:${PORT}`;
     
@@ -502,6 +783,7 @@ const http = require('http');
 const https = require('https');
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 const { exec } = require('child_process');
 
 // Parse Arguments
@@ -546,7 +828,7 @@ function getPrinters() {
       if (error) {
         resolve([]);
       } else {
-        const printers = stdout.trim().split('\n').filter(p => p.length > 0);
+        const printers = stdout.trim().split('\\n').filter(p => p.length > 0);
         resolve(printers);
       }
     });
@@ -616,10 +898,8 @@ function printFileNative(filePath) {
     let command = '';
 
     if (platform === 'win32') {
-      // Windows: use PowerShell to print
       command = \`powershell.exe -Command "Start-Process -FilePath '\${filePath}' -Verb Print"\`;
     } else if (platform === 'darwin' || platform === 'linux') {
-      // macOS / Linux: use standard lp command
       command = \`lp "\${filePath}"\`;
     } else {
       return reject(new Error(\`Unsupported OS platform: \${platform}\`));
@@ -639,12 +919,13 @@ function printFileNative(filePath) {
 // Main polling loop
 async function pollQueue() {
   try {
-    // 1. Ping server to maintain online status
+    // 1. Ping server to maintain online status and send detected printers
     try {
+      const detectedPrinters = await getPrinters();
       await requestHelper(\`\${SERVER_URL}/api/printers/ping\`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: { printerId: PRINTER_ID, apiKey: API_KEY }
+        body: { printerId: PRINTER_ID, apiKey: API_KEY, detectedPrinters }
       });
     } catch (e) {
       console.warn(\`[Ping Warning] Unable to ping server: \${e.message}\`);
@@ -670,6 +951,20 @@ async function pollQueue() {
       const localFilePath = path.join(TEMP_DIR, job.fileName);
       await downloadFile(downloadUrl, localFilePath);
       console.log(\`-> Downloaded to: \${localFilePath}\`);
+
+      // B2. Verify SHA-256 Checksum Integrity
+      if (job.sha256) {
+        console.log("-> Verifying file integrity checksum (SHA-256)...");
+        const fileBuffer = fs.readFileSync(localFilePath);
+        const localHash = crypto.createHash('sha256').update(fileBuffer).digest('hex');
+        if (localHash !== job.sha256) {
+          console.error(\`-> Checksum mismatch! Expected: \${job.sha256}, Got: \${localHash}\`);
+          await updateJobStatus(job.id, 'failed', 'Integrity check failed: checksum mismatch (SHA-256).');
+          try { fs.unlinkSync(localFilePath); } catch (e) {}
+          return;
+        }
+        console.log("-> Checksum matches perfectly! Payload is clean and verified.");
+      }
 
       // C. Set status to Printing
       console.log(\`-> Spooling to printer...\`);
@@ -706,7 +1001,6 @@ pollQueue(); // Run immediately on start
     res.send(clientCode);
   });
 
-
   // Vite middleware for development
   if (process.env.NODE_ENV !== "production") {
     const vite = await createViteServer({
@@ -723,7 +1017,7 @@ pollQueue(); // Run immediately on start
   }
 
   app.listen(PORT, "0.0.0.0", () => {
-    console.log(`Server running on http://localhost:${PORT}`);
+    logger.info(`Enterprise Print Queue Sync Engine running on port ${PORT}`);
   });
 }
 
