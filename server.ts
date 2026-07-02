@@ -93,14 +93,14 @@ async function upgradeLegacyPasswords() {
 async function bootstrapInitialAdminFromEnvIfNeeded() {
   const users = await repository.getUsers();
   if (users.length > 0) {
-    return { bootstrapped: false, needsSetup: false, hasUsers: true };
+    return { bootstrapped: false, needsSetup: false, hasUsers: true, reason: "existing_users" as const };
   }
 
   const adminMobile = process.env.ADMIN_MOBILE?.trim();
   const adminPassword = process.env.ADMIN_PASSWORD;
 
   if (!adminMobile || !adminPassword) {
-    return { bootstrapped: false, needsSetup: true, hasUsers: false };
+    return { bootstrapped: false, needsSetup: true, hasUsers: false, reason: "missing_bootstrap_env" as const };
   }
 
   await repository.saveUser({
@@ -110,7 +110,7 @@ async function bootstrapInitialAdminFromEnvIfNeeded() {
   });
 
   logger.info(`Created initial administrator from environment bootstrap`, { mobile: adminMobile });
-  return { bootstrapped: true, needsSetup: false, hasUsers: true };
+  return { bootstrapped: true, needsSetup: false, hasUsers: true, reason: "bootstrapped_from_env" as const };
 }
 
 function generateToken(user: { mobile: string; role: string }) {
@@ -295,6 +295,7 @@ async function startServer() {
       res.json({
         hasUsers: state.hasUsers,
         needsSetup: state.needsSetup,
+        reason: state.reason,
         canBootstrapFromEnv: Boolean(process.env.ADMIN_MOBILE?.trim() && process.env.ADMIN_PASSWORD),
       });
     } catch (err) {
@@ -347,7 +348,11 @@ async function startServer() {
     try {
       const setupState = await bootstrapInitialAdminFromEnvIfNeeded();
       if (setupState.needsSetup) {
-        return res.status(409).json({ error: "Setup is required before logging in", needsSetup: true });
+        return res.status(409).json({
+          error: "Setup is required before logging in",
+          needsSetup: true,
+          reason: "missing_bootstrap_env",
+        });
       }
 
       const users = await repository.getUsers();

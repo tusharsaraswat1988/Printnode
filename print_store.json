@@ -1,11 +1,5 @@
 {
   "printers": [],
   "jobs": [],
-  "users": [
-    {
-      "mobile": "1234567890",
-      "password": "123456",
-      "role": "admin"
-    }
-  ]
+  "users": []
 }

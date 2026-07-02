@@ -46,6 +46,7 @@ export default function App() {
   
   const [user, setUser] = useState<{ mobile: string; role: "admin" | "employee" } | null>(null);
   const [setupRequired, setSetupRequired] = useState(false);
+  const [setupReason, setSetupReason] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
 
@@ -68,6 +69,7 @@ export default function App() {
         if (setupRes.ok) {
           const setupData = await setupRes.json();
           setSetupRequired(Boolean(setupData.needsSetup));
+          setSetupReason(setupData.reason || null);
           if (setupData.needsSetup) {
             setUser(null);
             setLoading(false);
@@ -162,7 +164,11 @@ export default function App() {
 
   if (!user) {
     if (setupRequired) {
-      return <SetupWizard onComplete={() => window.location.reload()} />;
+      return (
+        <SetupWizard
+          onComplete={() => window.location.reload()}
+        />
+      );
     }
     return <LoginPage onLogin={() => window.location.reload()} />;
   }
