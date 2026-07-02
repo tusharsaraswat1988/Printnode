@@ -100,7 +100,8 @@ class ConfigurationService {
       pollInterval: 5000,
       heartbeatInterval: 10000,
       localPort: 3010,
-      debug: false
+      debug: false,
+      sumatraPath: ''
     };
 
     this.load();
@@ -129,6 +130,7 @@ class ConfigurationService {
     if (!this.config.printerId && process.env.PRINTER_ID) this.config.printerId = process.env.PRINTER_ID;
     if (!this.config.apiKey && process.env.API_KEY) this.config.apiKey = process.env.API_KEY;
     if (!this.config.serverUrl && process.env.SERVER_URL) this.config.serverUrl = process.env.SERVER_URL;
+    if (!this.config.sumatraPath && process.env.SUMATRAPDF_PATH) this.config.sumatraPath = process.env.SUMATRAPDF_PATH;
 
     // Validate and save if updated via CLI/Env
     if (this.config.printerId && this.config.apiKey) {
@@ -164,63 +166,39 @@ class PrinterService {
     this.logger = logger;
     this.config = config;
     this.binDir = path.join(__dirname, 'bin');
-    this.sumatraPath = path.join(this.binDir, 'SumatraPDF.exe');
-    this.sumatraDownloadUrls = [
-      'https://github.com/sumatrapdfreader/sumatrapdf/releases/download/v3.5.2/SumatraPDF-3.5.2-64.exe',
-      'https://www.sumatrapdfreader.org/dl/SumatraPDF-3.5.2-64.exe'
-    ];
+    
+    // Resolve SumatraPDF path from configuration if specified
+    const configuredPath = this.config.get('sumatraPath');
+    this.sumatraPath = configuredPath ? path.resolve(configuredPath) : path.join(this.binDir, 'SumatraPDF.exe');
 
     if (process.platform === 'win32') {
       this.ensureSumatraPDF();
     }
   }
 
-  async ensureSumatraPDF() {
+  ensureSumatraPDF() {
     if (fs.existsSync(this.sumatraPath)) {
-      this.logger.debug('PRINTER_NATIVE', 'SumatraPDF executable found and verified locally.');
-      return;
+      this.logger.debug('PRINTER_NATIVE', `SumatraPDF executable found and verified locally at: ${this.sumatraPath}`);
+      return true;
     }
 
-    if (!fs.existsSync(this.binDir)) {
-      fs.mkdirSync(this.binDir, { recursive: true });
-    }
+    // Since the download links are 404/broken, we log a highly visible warning block with manual instructions.
+    console.warn('\n======================================================================');
+    console.warn('❌ CRITICAL WARNING: SumatraPDF executable not found on this system!');
+    console.warn(`Expected Path: ${this.sumatraPath}`);
+    console.warn('To print PDF/images on Windows, SumatraPDF is required.');
+    console.warn('----------------------------------------------------------------------');
+    console.warn('Manual Download Instructions:');
+    console.warn('1. Download the 64-bit portable version of SumatraPDF from:');
+    console.warn('   https://www.sumatrapdfreader.org/free-pdf-reader');
+    console.warn('2. Save it as SumatraPDF.exe in:');
+    console.warn(`   ${this.sumatraPath}`);
+    console.warn('3. OR configure a custom path in your settings config.json:');
+    console.warn('   { "sumatraPath": "C:\\\\path\\\\to\\\\SumatraPDF.exe" }');
+    console.warn('======================================================================\n');
 
-    this.logger.warn('PRINTER_NATIVE', 'SumatraPDF executable is missing. Bootstrapping automatic silent download...');
-    
-    for (const url of this.sumatraDownloadUrls) {
-      try {
-        this.logger.info('PRINTER_NATIVE', `Downloading SumatraPDF portable package from ${url}`);
-        await this.downloadBinary(url, this.sumatraPath);
-        this.logger.info('PRINTER_NATIVE', 'SumatraPDF successfully bootstrapped and verified for system operations.');
-        return;
-      } catch (err) {
-        this.logger.error('PRINTER_NATIVE', `Download attempt failed from source: ${url}`, err.message);
-      }
-    }
-    this.logger.error('PRINTER_NATIVE', 'CRITICAL: SumatraPDF could not be downloaded. Windows printing will be offline.');
-  }
-
-  downloadBinary(url, destPath) {
-    return new Promise((resolve, reject) => {
-      const client = url.startsWith('https') ? https : http;
-      const file = fs.createWriteStream(destPath);
-      client.get(url, (res) => {
-        if (res.statusCode !== 200) {
-          file.close();
-          fs.unlinkSync(destPath);
-          return reject(new Error(`Download failed with HTTP ${res.statusCode}`));
-        }
-        res.pipe(file);
-        file.on('finish', () => {
-          file.close();
-          resolve();
-        });
-      }).on('error', (err) => {
-        file.close();
-        fs.unlink(destPath, () => {});
-        reject(err);
-      });
-    });
+    this.logger.warn('PRINTER_NATIVE', `SumatraPDF not found at: ${this.sumatraPath}. Windows print driver operations will fail until resolved.`);
+    return false;
   }
 
   getInstalledPrinters() {
@@ -314,6 +292,10 @@ class PrinterService {
       const printerName = job.printerName || job.printerId;
 
       if (platform === 'win32') {
+        if (!fs.existsSync(this.sumatraPath)) {
+          return reject(new Error(`SumatraPDF.exe is missing at path: ${this.sumatraPath}. Windows printing will fail. Please place SumatraPDF.exe at this path or configure "sumatraPath" in your config.json settings.`));
+        }
+
         // Build settings parameters for SumatraPDF
         const settings = [];
         if (job.copies && job.copies > 1) settings.push(`${job.copies}x`);
