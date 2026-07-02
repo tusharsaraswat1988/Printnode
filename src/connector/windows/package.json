@@ -1,0 +1,47 @@
+{
+  "name": "bidwar-printer-connector",
+  "version": "2.1.0",
+  "private": true,
+  "description": "BidWar Windows Printer Connector",
+  "main": "src/setup.js",
+  "scripts": {
+    "start": "node src/setup.js",
+    "service": "node src/service.js",
+    "build": "electron-builder --win nsis"
+  },
+  "build": {
+    "appId": "in.bidwar.printer-connector",
+    "productName": "BidWar Printer Connector",
+    "artifactName": "BidWar Printer Connector.exe",
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "src/**/*",
+      "resources/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "../../daemon/print-daemon.js",
+        "to": "daemon/print-daemon.js"
+      }
+    ],
+    "win": {
+      "target": "nsis",
+      "requestedExecutionLevel": "requireAdministrator"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": true,
+      "allowElevation": true,
+      "allowToChangeInstallationDirectory": false,
+      "createDesktopShortcut": false,
+      "createStartMenuShortcut": true
+    }
+  },
+  "devDependencies": {
+    "electron": "^38.0.0",
+    "electron-builder": "^26.0.0"
+  }
+}

@@ -28,7 +28,7 @@ import PrintersManagement from "./components/PrintersManagement";
 import QueueManager from "./components/QueueManager";
 import HistoryManager from "./components/HistoryManager";
 import UsersManagement from "./components/UsersManagement";
-import WiredPCGuide from "./components/WiredPCGuide";
+import ConnectorOnboarding from "./components/ConnectorOnboarding";
 import SystemStatusPanel from "./components/SystemStatusPanel";
 import SettingsPanel from "./components/SettingsPanel";
 import LoginPage from "./components/LoginPage";
@@ -181,7 +181,7 @@ export default function App() {
     { id: "printers", label: "Printers", icon: PrinterIcon, adminOnly: true },
     { id: "users", label: "Users", icon: UserIcon, adminOnly: true },
     { id: "settings", label: "Settings", icon: Settings2, adminOnly: true },
-    { id: "wired", label: "Wired PC", icon: Cpu, adminOnly: true },
+    { id: "wired", label: "Connector", icon: Cpu, adminOnly: true },
     { id: "status", label: "System Status", icon: Activity, adminOnly: true },
   ];
 
@@ -468,7 +468,7 @@ export default function App() {
           )}
 
           {currentTab === "wired" && (
-            <WiredPCGuide 
+            <ConnectorOnboarding 
               printers={printers} 
             />
           )}

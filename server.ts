@@ -56,6 +56,17 @@ logger.info("Active File Storage: LocalFileStorage (./uploads)");
 const TOKEN_SECRET = "print-token-secret-xyz-987";
 const BCRYPT_ROUNDS = 10;
 const BCRYPT_HASH_PATTERN = /^\$2[aby]\$/;
+const CONNECTOR_VERSION = "2.1.0";
+const INSTALL_TOKEN_TTL_MS = 15 * 60 * 1000;
+
+type ConnectorInstallToken = {
+  printerId: string;
+  createdBy?: string;
+  expiresAt: number;
+  usedAt?: number;
+};
+
+const connectorInstallTokens = new Map<string, ConnectorInstallToken>();
 
 function isBcryptHash(value: string) {
   return BCRYPT_HASH_PATTERN.test(value);
@@ -131,6 +142,48 @@ function verifyToken(token: string): { mobile: string; role: string } | null {
     return JSON.parse(payload);
   } catch (err) {
     return null;
+  }
+}
+
+function getPublicAppUrl(req: express.Request, port: number) {
+  const configured = process.env.APP_URL?.trim();
+  if (configured) return configured.replace(/\/$/, "");
+  const protocol = req.get("x-forwarded-proto") || req.protocol;
+  const host = req.get("host") || `localhost:${port}`;
+  return `${protocol}://${host}`;
+}
+
+function hashInstallToken(token: string) {
+  return crypto.createHash("sha256").update(token).digest("hex");
+}
+
+function createInstallToken(printerId: string, createdBy?: string) {
+  const token = crypto.randomBytes(32).toString("base64url");
+  const expiresAt = Date.now() + INSTALL_TOKEN_TTL_MS;
+  connectorInstallTokens.set(hashInstallToken(token), { printerId, createdBy, expiresAt });
+  return { token, expiresAt };
+}
+
+function claimInstallToken(token: string) {
+  const tokenHash = hashInstallToken(token);
+  const record = connectorInstallTokens.get(tokenHash);
+  if (!record) return { error: "invalid" as const };
+  if (record.usedAt) return { error: "used" as const };
+  if (Date.now() > record.expiresAt) {
+    connectorInstallTokens.delete(tokenHash);
+    return { error: "expired" as const };
+  }
+  record.usedAt = Date.now();
+  connectorInstallTokens.set(tokenHash, record);
+  return { record };
+}
+
+function pruneExpiredInstallTokens() {
+  const now = Date.now();
+  for (const [tokenHash, record] of connectorInstallTokens.entries()) {
+    if (record.usedAt || now > record.expiresAt) {
+      connectorInstallTokens.delete(tokenHash);
+    }
   }
 }
 
@@ -418,6 +471,8 @@ async function startServer() {
     res.json({ user });
   });
 
+  setInterval(pruneExpiredInstallTokens, 60 * 1000);
+
   // --- ADMIN PANEL USER MANAGEMENT (RBAC Protected) ---
   app.post("/api/admin/users", requireAdmin, async (req: any, res: any) => {
     const { mobile, password, role } = req.body;
@@ -439,6 +494,110 @@ async function startServer() {
     }
   });
 
+  // --- WINDOWS CONNECTOR TOKEN PAIRING ---
+  app.post("/api/connectors/install-token", isAuthenticated, async (req: any, res: any) => {
+    const { printerId } = req.body;
+    if (!printerId) {
+      return res.status(400).json({ error: "printerId is required" });
+    }
+
+    try {
+      const printer = await repository.getPrinter(String(printerId));
+      if (!printer) {
+        return res.status(404).json({ error: "Printer not found" });
+      }
+
+      const { token, expiresAt } = createInstallToken(printer.id, req.session?.user?.mobile);
+      const appUrl = getPublicAppUrl(req, PORT);
+      res.status(201).json({
+        token,
+        expiresAt: new Date(expiresAt).toISOString(),
+        connectorVersion: CONNECTOR_VERSION,
+        downloadUrl: `${appUrl}/api/connectors/windows/download?token=${encodeURIComponent(token)}`,
+        claimUrl: `${appUrl}/api/connectors/claim`,
+      });
+    } catch (err) {
+      logger.error("Failed to create connector install token", err);
+      res.status(500).json({ error: "Failed to create connector install token" });
+    }
+  });
+
+  app.get("/api/connectors/windows/download", (req, res) => {
+    const token = String(req.query.token || "");
+    const downloadRecord = token ? connectorInstallTokens.get(hashInstallToken(token)) : null;
+    if (!downloadRecord || downloadRecord.usedAt || Date.now() > downloadRecord.expiresAt) {
+      return res.status(400).send("Invalid or expired connector download token.");
+    }
+
+    const candidates = [
+      path.join(process.cwd(), "dist", "connectors", "BidWar Printer Connector.exe"),
+      path.join(process.cwd(), "src", "connector", "windows", "dist", "BidWar Printer Connector.exe"),
+    ];
+    const installerPath = candidates.find((candidate) => fs.existsSync(candidate));
+
+    if (!installerPath) {
+      return res.status(503).send("BidWar Printer Connector.exe has not been built on this server yet.");
+    }
+
+    const filenamePayload = Buffer.from(JSON.stringify({
+      token,
+      claimUrl: `${getPublicAppUrl(req, PORT)}/api/connectors/claim`,
+    })).toString("base64url");
+
+    res.download(installerPath, `BidWar Printer Connector--${filenamePayload}.exe`);
+  });
+
+  app.post("/api/connectors/claim", async (req, res) => {
+    const { token, physicalPrinterName, hostname, connectorVersion } = req.body || {};
+    if (!token) {
+      return res.status(400).json({ error: "Installation token is required" });
+    }
+
+    const claimed = claimInstallToken(String(token));
+    if ("error" in claimed) {
+      const status = claimed.error === "expired" ? 410 : 401;
+      return res.status(status).json({ error: `Installation token ${claimed.error}` });
+    }
+
+    try {
+      const printer = await repository.getPrinter(claimed.record.printerId);
+      if (!printer) {
+        return res.status(404).json({ error: "Printer no longer exists" });
+      }
+
+      printer.lastSeen = new Date().toISOString();
+      if (printer.status === "offline") {
+        printer.status = "online";
+      }
+      if (connectorVersion) {
+        printer.daemonVersion = String(connectorVersion);
+      }
+      await repository.savePrinter(printer);
+
+      logger.info("Windows connector installation token claimed", {
+        printerId: printer.id,
+        physicalPrinterName,
+        hostname,
+        connectorVersion,
+      });
+
+      res.json({
+        success: true,
+        serverUrl: getPublicAppUrl(req, PORT),
+        printerId: printer.id,
+        apiKey: printer.apiKey,
+        cloudPrinterName: printer.name,
+        printerName: physicalPrinterName || printer.name,
+        connectorVersion: CONNECTOR_VERSION,
+        pollInterval: 5000,
+        heartbeatInterval: 10000,
+      });
+    } catch (err) {
+      logger.error("Failed to claim connector install token", err);
+      res.status(500).json({ error: "Failed to claim connector install token" });
+    }
+  });
+
   // Protect all remaining /api routes (exclude login, me, and daemon routes)
   app.use("/api", (req, res, next) => {
     const isPublic = req.path === "/login" || 
@@ -450,7 +609,9 @@ async function startServer() {
                      req.path.endsWith("/download") || 
                      req.path.endsWith("/status") || 
                      req.path === "/download-daemon" ||
-                     req.path === "/client-script";
+                     req.path === "/client-script" ||
+                     req.path === "/connectors/claim" ||
+                     req.path === "/connectors/windows/download";
     if (isPublic) {
       next();
     } else {
@@ -606,7 +767,8 @@ async function startServer() {
       paperStatus,
       tonerStatus,
       daemonVersion,
-      uptime
+      uptime,
+      physicalPrinterName
     } = req.body;
     
     if (!apiKey || !printerId) {
@@ -625,7 +787,10 @@ async function startServer() {
       }
 
       if (detectedPrinters && Array.isArray(detectedPrinters)) {
-        logger.info(`Detected physical devices from print client '${printerId}':`, detectedPrinters);
+        logger.info(`Detected physical devices from print client '${printerId}':`, {
+          detectedPrinters,
+          physicalPrinterName,
+        });
       }
 
       // Update diagnostic telemetry

@@ -330,36 +330,44 @@ export default function PrintersManagement({
                   </p>
                 </div>
 
-                {/* Lower metadata box */}
-                <div className="bg-slate-50 p-3.5 rounded-xl border border-slate-100 space-y-2 text-[11px] font-mono">
-                  <div className="flex items-center justify-between">
-                    <span className="text-slate-400 font-medium">Printer ID:</span>
-                    <div className="flex items-center space-x-1">
-                      <span className="text-slate-800 font-bold bg-white px-1.5 py-0.5 rounded border border-slate-200/60 select-all">{p.id}</span>
-                      <button
-                        onClick={() => copyToClipboard(p.id, p.id + "-id")}
-                        className="p-1 hover:bg-slate-200 rounded text-slate-400 hover:text-slate-700"
-                        title="Copy Printer ID"
-                      >
-                        {copiedId === p.id + "-id" ? <Check className="h-3 w-3 text-emerald-500" /> : <Copy className="h-3 w-3" />}
-                      </button>
+                <details className="bg-slate-50 rounded-xl border border-slate-100 text-[11px] font-mono">
+                  <summary className="cursor-pointer list-none p-3.5 text-slate-500 font-bold uppercase tracking-wider flex items-center justify-between">
+                    <span className="inline-flex items-center">
+                      <Key className="h-3.5 w-3.5 mr-1.5 text-slate-400" />
+                      Developer Options
+                    </span>
+                    <span className="text-[10px] text-slate-400">Show credentials</span>
+                  </summary>
+                  <div className="px-3.5 pb-3.5 space-y-2">
+                    <div className="flex items-center justify-between gap-3">
+                      <span className="text-slate-400 font-medium">Printer ID:</span>
+                      <div className="flex items-center space-x-1 min-w-0">
+                        <span className="text-slate-800 font-bold bg-white px-1.5 py-0.5 rounded border border-slate-200/60 select-all truncate">{p.id}</span>
+                        <button
+                          onClick={() => copyToClipboard(p.id, p.id + "-id")}
+                          className="p-1 hover:bg-slate-200 rounded text-slate-400 hover:text-slate-700 shrink-0"
+                          title="Copy Printer ID"
+                        >
+                          {copiedId === p.id + "-id" ? <Check className="h-3 w-3 text-emerald-500" /> : <Copy className="h-3 w-3" />}
+                        </button>
+                      </div>
                     </div>
-                  </div>
 
-                  <div className="flex items-center justify-between">
-                    <span className="text-slate-400 font-medium">Pairing Key:</span>
-                    <div className="flex items-center space-x-1">
-                      <span className="text-slate-800 font-bold bg-white px-1.5 py-0.5 rounded border border-slate-200/60 select-all">{p.apiKey}</span>
-                      <button
-                        onClick={() => copyToClipboard(p.apiKey, p.id + "-key")}
-                        className="p-1 hover:bg-slate-200 rounded text-slate-400 hover:text-slate-700"
-                        title="Copy Pairing Key"
-                      >
-                        {copiedId === p.id + "-key" ? <Check className="h-3 w-3 text-emerald-500" /> : <Copy className="h-3 w-3" />}
-                      </button>
+                    <div className="flex items-center justify-between gap-3">
+                      <span className="text-slate-400 font-medium">Pairing Key:</span>
+                      <div className="flex items-center space-x-1 min-w-0">
+                        <span className="text-slate-800 font-bold bg-white px-1.5 py-0.5 rounded border border-slate-200/60 select-all truncate">{p.apiKey}</span>
+                        <button
+                          onClick={() => copyToClipboard(p.apiKey, p.id + "-key")}
+                          className="p-1 hover:bg-slate-200 rounded text-slate-400 hover:text-slate-700 shrink-0"
+                          title="Copy Pairing Key"
+                        >
+                          {copiedId === p.id + "-key" ? <Check className="h-3 w-3 text-emerald-500" /> : <Copy className="h-3 w-3" />}
+                        </button>
+                      </div>
                     </div>
                   </div>
-                </div>
+                </details>
               </div>
             );
           })

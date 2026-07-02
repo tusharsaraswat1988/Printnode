@@ -101,7 +101,8 @@ class ConfigurationService {
       heartbeatInterval: 10000,
       localPort: 3010,
       debug: false,
-      sumatraPath: ''
+      sumatraPath: '',
+      printerName: ''
     };
 
     this.load();
@@ -125,12 +126,14 @@ class ConfigurationService {
     if (args[0]) this.config.printerId = args[0];
     if (args[1]) this.config.apiKey = args[1];
     if (args[2]) this.config.serverUrl = args[2];
+    if (args[3]) this.config.printerName = args[3];
 
     // 3. Fallback to Environment Variables
     if (!this.config.printerId && process.env.PRINTER_ID) this.config.printerId = process.env.PRINTER_ID;
     if (!this.config.apiKey && process.env.API_KEY) this.config.apiKey = process.env.API_KEY;
     if (!this.config.serverUrl && process.env.SERVER_URL) this.config.serverUrl = process.env.SERVER_URL;
     if (!this.config.sumatraPath && process.env.SUMATRAPDF_PATH) this.config.sumatraPath = process.env.SUMATRAPDF_PATH;
+    if (!this.config.printerName && process.env.PRINTER_NAME) this.config.printerName = process.env.PRINTER_NAME;
 
     // Validate and save if updated via CLI/Env
     if (this.config.printerId && this.config.apiKey) {
@@ -289,7 +292,7 @@ class PrinterService {
       const platform = process.platform;
       
       // Select correct printer name
-      const printerName = job.printerName || job.printerId;
+      const printerName = this.config.get('printerName') || job.printerName || job.printerId;
 
       if (platform === 'win32') {
         if (!fs.existsSync(this.sumatraPath)) {
@@ -600,7 +603,7 @@ class QueueManager {
         // --- 6. PRINTED (Verification Spool check) ---
         this.logger.info('LIFECYCLE', `[Job ID: ${job.id}] -> PRINTED. Querying spooler...`);
         await this.updateServerStatus(job.id, 'printed', `Print stream successfully transferred. Checking device buffer...`);
-        const spoolCheck = await this.printerService.monitorSpoolerForJob(job.printerName || job.printerId, localFilePath);
+        const spoolCheck = await this.printerService.monitorSpoolerForJob(this.config.get('printerName') || job.printerName || job.printerId, localFilePath);
 
         if (!spoolCheck.success) {
           throw new Error(spoolCheck.message);
@@ -689,7 +692,7 @@ class HeartbeatService {
     this.config = config;
     this.printerService = printerService;
     this.queueManager = queueManager;
-    this.version = '2.0.0-enterprise';
+    this.version = '2.1.0-connector';
     this.startupTime = Date.now();
     this.intervalId = null;
   }
@@ -719,13 +722,15 @@ class HeartbeatService {
       // 1. Fetch OS devices list
       const detectedPrinters = await this.printerService.getInstalledPrinters();
       
-      // 2. Fetch hardware telemetry of our dedicated printer
-      const hardware = await this.printerService.getPrinterHardwareStatus(printerId);
+      // 2. Fetch hardware telemetry of our dedicated local Windows printer
+      const physicalPrinterName = this.config.get('printerName') || printerId;
+      const hardware = await this.printerService.getPrinterHardwareStatus(physicalPrinterName);
       
       const payload = {
         printerId,
         apiKey,
         detectedPrinters,
+        physicalPrinterName,
         queueLength: this.queueManager.getQueueLength() + (hardware.spoolerJobs || 0),
         paperStatus: hardware.paper,
         tonerStatus: hardware.toner,
@@ -797,13 +802,15 @@ class MonitoringServer {
         const diskFree = await this.getDiskFreeSpace();
         const printers = await this.printerService.getInstalledPrinters();
         const printerId = this.config.get('printerId');
-        const printerConnected = printers.includes(printerId);
+        const physicalPrinterName = this.config.get('printerName') || printerId;
+        const printerConnected = printers.includes(physicalPrinterName);
         
         const health = {
           status: 'healthy',
-          daemonVersion: '2.0.0-enterprise',
+          daemonVersion: '2.1.0-connector',
           uptime: process.uptime(),
           printerId: printerId,
+          printerName: physicalPrinterName,
           printerConnected: printerConnected,
           queueLength: this.queueManager.getQueueLength(),
           memory: {
@@ -914,6 +921,7 @@ class DaemonApp {
     this.logger.info('APP', '      REMOTE PRINT AGENT DAEMON STARTING          ');
     this.logger.info('APP', '==================================================');
     this.logger.info('APP', `Printer ID  : ${printerId}`);
+    this.logger.info('APP', `Printer Name: ${this.configService.get('printerName') || '(using cloud printer ID)'}`);
     this.logger.info('APP', `Server Host : ${this.configService.get('serverUrl')}`);
     this.logger.info('APP', `Max Retries : ${this.configService.get('maxRetries')} attempts`);
     this.logger.info('APP', `Environment : Node.js ${process.version} | ${process.platform}`);
