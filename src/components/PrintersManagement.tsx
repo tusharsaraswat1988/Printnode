@@ -163,7 +163,7 @@ export default function PrintersManagement({
               <input
                 id="new-p-name"
                 type="text"
-                placeholder="e.g. HP LaserJet Pro M404"
+                placeholder="e.g. Front Desk Printer"
                 value={name}
                 onChange={(e) => setName(e.target.value)}
                 required
@@ -209,7 +209,7 @@ export default function PrintersManagement({
         {filteredPrinters.length === 0 ? (
           <div className="col-span-2 text-center py-16 bg-white border border-slate-200 rounded-2xl">
             <PrinterIcon className="h-12 w-12 text-slate-300 mx-auto mb-3" />
-            <p className="text-sm font-bold text-slate-500">No remote printers registered</p>
+            <p className="text-sm font-bold text-slate-500">No printers configured</p>
             <p className="text-xs text-slate-400 mt-1 max-w-sm mx-auto">Create and link a virtual or hardware printer profile above to enable remote cloud printing.</p>
           </div>
         ) : (

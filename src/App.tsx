@@ -47,6 +47,17 @@ export default function App() {
   const [loading, setLoading] = useState(true);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
 
+  useEffect(() => {
+    const handleNavigateToPrinters = () => {
+      if (user?.role === "admin") {
+        setActiveTab("printers");
+      }
+    };
+
+    window.addEventListener("navigate-to-printers", handleNavigateToPrinters);
+    return () => window.removeEventListener("navigate-to-printers", handleNavigateToPrinters);
+  }, [user]);
+
   // Check login status
   useEffect(() => {
     fetch("/api/me", { credentials: 'include' })
@@ -356,7 +367,7 @@ export default function App() {
                 
                 <div className="space-y-3">
                   {printers.length === 0 ? (
-                    <p className="text-xs text-slate-500 font-bold">No active printers connected yet.</p>
+                    <p className="text-xs text-slate-500 font-bold">No printers configured</p>
                   ) : (
                     printers.map(p => {
                       const isOnline = p.status === "online" || p.status === "printing";
