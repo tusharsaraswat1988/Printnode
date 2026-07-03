@@ -87,7 +87,15 @@ export default function ClientGuide({ selectedPrinterId = "YOUR_PRINTER_ID", sel
             title="Download JS script"
           >
             <Download className="h-3 w-3" />
-            <span>Download</span>
+            <span>Download JS</span>
+          </a>
+          <a
+            href="/api/connectors/windows/download"
+            className="inline-flex items-center space-x-1 px-2.5 py-1 bg-amber-600 hover:bg-amber-500 text-white text-[10px] font-semibold rounded transition-all"
+            title="Download Standalone Windows Connector (.exe)"
+          >
+            <Download className="h-3 w-3" />
+            <span>Download EXE</span>
           </a>
           <button
             onClick={copyCode}
@@ -121,7 +129,7 @@ export default function ClientGuide({ selectedPrinterId = "YOUR_PRINTER_ID", sel
             </p>
           )}
           <p className="text-[10px] text-indigo-300/70 mt-1">
-            Note: The script prints natively via macOS/Linux <code className="bg-slate-900 text-slate-300 px-1 py-0.5 rounded font-mono">lp</code> or Windows PowerShell <code className="bg-slate-900 text-slate-300 px-1 py-0.5 rounded font-mono">Start-Process -Verb Print</code>.
+            Note: The script prints natively via macOS/Linux <code className="bg-slate-900 text-slate-300 px-1 py-0.5 rounded font-mono">lp</code> or Windows PowerShell. For Windows PDF/image printing, SumatraPDF is required. Save <code className="bg-slate-900 text-slate-300 px-1 py-0.5 rounded font-mono">SumatraPDF.exe</code> in the same folder or set its path in local <code className="bg-slate-900 text-slate-300 px-1 py-0.5 rounded font-mono">config.json</code>.
           </p>
         </div>
       </div>

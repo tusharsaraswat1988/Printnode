@@ -1,0 +1,58 @@
+name: Build and Release Windows Connector
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build Windows Executable
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+
+      - name: Install Dependencies
+        run: |
+          npm ci || npm install
+
+      - name: Build Windows Connector Executable
+        run: |
+          mkdir -p dist
+          npx pkg src/daemon/print-daemon.js --targets node18-win-x64 --output dist/BidWar-Printer-Connector.exe
+
+      - name: Upload Build Artifact to GitHub Actions
+        uses: actions/upload-artifact@v4
+        with:
+          name: BidWar-Printer-Connector
+          path: dist/BidWar-Printer-Connector.exe
+
+      - name: Create or Update GitHub Release
+        uses: softprops/action-gh-release@v2
+        if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+        with:
+          tag_name: latest
+          name: Latest Release
+          body: |
+            Automated production build of the Windows Print Connector.
+            
+            This release contains the latest standalone Windows executable built automatically by the CI/CD pipeline.
+          draft: false
+          prerelease: false
+          files: |
+            dist/BidWar-Printer-Connector.exe
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

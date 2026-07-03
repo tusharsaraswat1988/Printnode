@@ -34,8 +34,13 @@ export default function SystemStatusPanel({
     try {
       const res = await fetch("/healthz");
       if (res.ok) {
-        const data = await res.json();
-        setHealthData(data);
+        const contentType = res.headers.get("content-type");
+        if (contentType && contentType.includes("application/json")) {
+          const data = await res.json();
+          setHealthData(data);
+        } else {
+          console.warn("fetchHealth: received non-JSON response.");
+        }
       }
     } catch (err) {
       console.error("Failed to fetch server metrics", err);

@@ -118,6 +118,31 @@ export default function WiredPCGuide({ printers }: WiredPCGuideProps) {
             Launch your command prompt or terminal in the same folder and copy the Command below to run!
           </div>
         </div>
+        
+        {/* Windows User SumatraPDF Notice */}
+        <div className="mb-6 bg-amber-500/10 border border-amber-500/20 p-4 rounded-xl text-xs space-y-2 text-amber-200">
+          <div className="flex items-center space-x-2">
+            <AlertCircle className="h-4.5 w-4.5 text-amber-400 shrink-0" />
+            <span className="font-bold text-white uppercase tracking-wider">Windows Host PC Requirement</span>
+          </div>
+          <p className="leading-relaxed text-slate-300">
+            If your print host is running <strong>Windows</strong>, printing PDFs or images requires <strong>SumatraPDF</strong>. Since automatic download is disabled (to avoid broken URL errors), please set it up manually:
+          </p>
+          <ol className="list-decimal list-inside space-y-1.5 text-slate-300 text-[11px] pl-1 font-sans">
+            <li>Download the 64-bit portable version of SumatraPDF from <a href="https://www.sumatrapdfreader.org/free-pdf-reader" target="_blank" rel="noreferrer" className="text-amber-400 hover:underline font-bold inline-flex items-center">SumatraPDF Official Site</a>.</li>
+            <li>Rename the file to <code className="bg-slate-950 px-1.5 py-0.5 rounded text-amber-300 font-mono text-[10px]">SumatraPDF.exe</code>.</li>
+            <li>Place it inside a <code className="bg-slate-950 px-1.5 py-0.5 rounded text-amber-300 font-mono text-[10px]">bin</code> directory (e.g. <code className="bg-slate-950 px-1.5 py-0.5 rounded text-amber-300 font-mono text-[10px]">./bin/SumatraPDF.exe</code>) next to your script, or right in the same folder.</li>
+            <li><strong>Custom Path Setting:</strong> You can also set a custom location for your SumatraPDF executable in your local <code className="bg-slate-950 px-1.5 py-0.5 rounded text-amber-300 font-mono text-[10px]">config.json</code> file:
+              <pre className="mt-2 bg-slate-950 p-3 rounded text-[10px] text-slate-300 font-mono border border-slate-800">
+{`{
+  "printerId": "${selectedPrinterId || "<PRINTER_ID>"}",
+  "apiKey": "${selectedPrinterKey || "<API_KEY>"}",
+  "sumatraPath": "C:\\\\Program Files\\\\SumatraPDF\\\\SumatraPDF.exe"
+}`}
+              </pre>
+            </li>
+          </ol>
+        </div>
 
         {/* Action Header */}
         <div className="flex items-center justify-between bg-slate-800 px-4 py-2.5 rounded-t-xl border border-b-0 border-slate-700">
@@ -133,6 +158,14 @@ export default function WiredPCGuide({ printers }: WiredPCGuideProps) {
             >
               <Download className="h-3.5 w-3.5" />
               <span>Download JS</span>
+            </a>
+            <a
+              href="/api/connectors/windows/download"
+              className="inline-flex items-center space-x-1 px-3 py-1.5 bg-amber-600 hover:bg-amber-500 text-white text-[10px] font-bold rounded transition-all"
+              title="Download Standalone Windows Connector (.exe)"
+            >
+              <Download className="h-3.5 w-3.5" />
+              <span>Download EXE</span>
             </a>
             <button
               onClick={copyCode}

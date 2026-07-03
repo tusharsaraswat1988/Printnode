@@ -28,11 +28,10 @@ import PrintersManagement from "./components/PrintersManagement";
 import QueueManager from "./components/QueueManager";
 import HistoryManager from "./components/HistoryManager";
 import UsersManagement from "./components/UsersManagement";
-import ConnectorOnboarding from "./components/ConnectorOnboarding";
+import WiredPCGuide from "./components/WiredPCGuide";
 import SystemStatusPanel from "./components/SystemStatusPanel";
 import SettingsPanel from "./components/SettingsPanel";
 import LoginPage from "./components/LoginPage";
-import SetupWizard from "./components/SetupWizard";
 
 export default function App() {
   const [printers, setPrinters] = useState<Printer[]>([]);
@@ -45,49 +44,24 @@ export default function App() {
   >("print");
   
   const [user, setUser] = useState<{ mobile: string; role: "admin" | "employee" } | null>(null);
-  const [setupRequired, setSetupRequired] = useState(false);
-  const [setupReason, setSetupReason] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
 
-  useEffect(() => {
-    const handleNavigateToPrinters = () => {
-      if (user?.role === "admin") {
-        setActiveTab("printers");
-      }
-    };
-
-    window.addEventListener("navigate-to-printers", handleNavigateToPrinters);
-    return () => window.removeEventListener("navigate-to-printers", handleNavigateToPrinters);
-  }, [user]);
-
   // Check login status
   useEffect(() => {
-    const bootstrap = async () => {
-      try {
-        const setupRes = await fetch("/api/setup/status", { credentials: "include" });
-        if (setupRes.ok) {
-          const setupData = await setupRes.json();
-          setSetupRequired(Boolean(setupData.needsSetup));
-          setSetupReason(setupData.reason || null);
-          if (setupData.needsSetup) {
-            setUser(null);
-            setLoading(false);
-            return;
-          }
+    fetch("/api/me", { credentials: 'include' })
+      .then(res => {
+        const contentType = res.headers.get("content-type");
+        if (res.ok && contentType && contentType.includes("application/json")) {
+          return res.json();
         }
-
-        const meRes = await fetch("/api/me", { credentials: "include" });
-        const meData = await meRes.json();
-        setUser(meData.user);
-      } catch (err) {
-        setUser(null);
-      } finally {
+        throw new Error("Non-JSON or invalid response");
+      })
+      .then(data => {
+        setUser(data.user);
         setLoading(false);
-      }
-    };
-
-    bootstrap();
+      })
+      .catch(() => setLoading(false));
   }, []);
 
   // Fetch all printers
@@ -95,8 +69,13 @@ export default function App() {
     try {
       const res = await fetch("/api/printers");
       if (res.ok) {
-        const data = await res.json();
-        setPrinters(data);
+        const contentType = res.headers.get("content-type");
+        if (contentType && contentType.includes("application/json")) {
+          const data = await res.json();
+          setPrinters(data);
+        } else {
+          console.warn("fetchPrinters: received non-JSON response.");
+        }
       }
     } catch (err) {
       console.error("Error fetching printers", err);
@@ -108,8 +87,13 @@ export default function App() {
     try {
       const res = await fetch("/api/jobs");
       if (res.ok) {
-        const data = await res.json();
-        setJobs(data);
+        const contentType = res.headers.get("content-type");
+        if (contentType && contentType.includes("application/json")) {
+          const data = await res.json();
+          setJobs(data);
+        } else {
+          console.warn("fetchJobs: received non-JSON response.");
+        }
       }
     } catch (err) {
       console.error("Error fetching jobs", err);
@@ -163,13 +147,6 @@ export default function App() {
   }
 
   if (!user) {
-    if (setupRequired) {
-      return (
-        <SetupWizard
-          onComplete={() => window.location.reload()}
-        />
-      );
-    }
     return <LoginPage onLogin={() => window.location.reload()} />;
   }
 
@@ -181,7 +158,7 @@ export default function App() {
     { id: "printers", label: "Printers", icon: PrinterIcon, adminOnly: true },
     { id: "users", label: "Users", icon: UserIcon, adminOnly: true },
     { id: "settings", label: "Settings", icon: Settings2, adminOnly: true },
-    { id: "wired", label: "Connector", icon: Cpu, adminOnly: true },
+    { id: "wired", label: "Wired PC", icon: Cpu, adminOnly: true },
     { id: "status", label: "System Status", icon: Activity, adminOnly: true },
   ];
 
@@ -395,7 +372,7 @@ export default function App() {
                 
                 <div className="space-y-3">
                   {printers.length === 0 ? (
-                    <p className="text-xs text-slate-500 font-bold">No printers configured</p>
+                    <p className="text-xs text-slate-500 font-bold">No active printers connected yet.</p>
                   ) : (
                     printers.map(p => {
                       const isOnline = p.status === "online" || p.status === "printing";
@@ -468,7 +445,7 @@ export default function App() {
           )}
 
           {currentTab === "wired" && (
-            <ConnectorOnboarding 
+            <WiredPCGuide 
               printers={printers} 
             />
           )}

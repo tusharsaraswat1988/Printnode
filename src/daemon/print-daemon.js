@@ -101,8 +101,7 @@ class ConfigurationService {
       heartbeatInterval: 10000,
       localPort: 3010,
       debug: false,
-      sumatraPath: '',
-      printerName: ''
+      sumatraPath: ''
     };
 
     this.load();
@@ -126,14 +125,12 @@ class ConfigurationService {
     if (args[0]) this.config.printerId = args[0];
     if (args[1]) this.config.apiKey = args[1];
     if (args[2]) this.config.serverUrl = args[2];
-    if (args[3]) this.config.printerName = args[3];
 
     // 3. Fallback to Environment Variables
     if (!this.config.printerId && process.env.PRINTER_ID) this.config.printerId = process.env.PRINTER_ID;
     if (!this.config.apiKey && process.env.API_KEY) this.config.apiKey = process.env.API_KEY;
     if (!this.config.serverUrl && process.env.SERVER_URL) this.config.serverUrl = process.env.SERVER_URL;
     if (!this.config.sumatraPath && process.env.SUMATRAPDF_PATH) this.config.sumatraPath = process.env.SUMATRAPDF_PATH;
-    if (!this.config.printerName && process.env.PRINTER_NAME) this.config.printerName = process.env.PRINTER_NAME;
 
     // Validate and save if updated via CLI/Env
     if (this.config.printerId && this.config.apiKey) {
@@ -169,24 +166,14 @@ class PrinterService {
     this.logger = logger;
     this.config = config;
     this.binDir = path.join(__dirname, 'bin');
-    this.sumatraPath = this.resolveSumatraPath();
+    
+    // Resolve SumatraPDF path from configuration if specified
+    const configuredPath = this.config.get('sumatraPath');
+    this.sumatraPath = configuredPath ? path.resolve(configuredPath) : path.join(this.binDir, 'SumatraPDF.exe');
 
     if (process.platform === 'win32') {
       this.ensureSumatraPDF();
     }
-  }
-
-  resolveSumatraPath() {
-    const configuredPath = this.config.get('sumatraPath');
-    const candidates = [
-      configuredPath ? path.resolve(configuredPath) : null,
-      path.join(this.binDir, 'SumatraPDF.exe'),
-      path.join(process.resourcesPath || '', 'daemon', 'bin', 'SumatraPDF.exe'),
-      path.join(process.cwd(), 'src', 'daemon', 'bin', 'SumatraPDF.exe')
-    ].filter(Boolean);
-
-    const found = candidates.find((candidate) => fs.existsSync(candidate));
-    return found || candidates[0];
   }
 
   ensureSumatraPDF() {
@@ -194,19 +181,6 @@ class PrinterService {
       this.logger.debug('PRINTER_NATIVE', `SumatraPDF executable found and verified locally at: ${this.sumatraPath}`);
       return true;
     }
-
-    console.warn('\n======================================================================');
-    console.warn('CRITICAL WARNING: Bundled PDF printing runtime is missing.');
-    console.warn(`Expected bundled path: ${this.sumatraPath}`);
-    console.warn('The Windows Connector should ship with PDF printing support built in.');
-    console.warn('----------------------------------------------------------------------');
-    console.warn('Recommended action: reinstall the BidWar Windows Connector installer.');
-    console.warn('If you are running the raw daemon manually, place SumatraPDF.exe in:');
-    console.warn(`   ${this.sumatraPath}`);
-    console.warn('======================================================================\n');
-
-    this.logger.warn('PRINTER_NATIVE', `Bundled SumatraPDF not found at: ${this.sumatraPath}. Windows PDF print operations will fail until the connector is reinstalled or the daemon bundle is repaired.`);
-    return false;
 
     // Since the download links are 404/broken, we log a highly visible warning block with manual instructions.
     console.warn('\n======================================================================');
@@ -315,11 +289,11 @@ class PrinterService {
       const platform = process.platform;
       
       // Select correct printer name
-      const printerName = this.config.get('printerName') || job.printerName || job.printerId;
+      const printerName = job.printerName || job.printerId;
 
       if (platform === 'win32') {
         if (!fs.existsSync(this.sumatraPath)) {
-          return reject(new Error(`Bundled PDF printing runtime is missing at ${this.sumatraPath}. Reinstall the BidWar Windows Connector to restore Windows PDF printing.`));
+          return reject(new Error(`SumatraPDF.exe is missing at path: ${this.sumatraPath}. Windows printing will fail. Please place SumatraPDF.exe at this path or configure "sumatraPath" in your config.json settings.`));
         }
 
         // Build settings parameters for SumatraPDF
@@ -626,7 +600,7 @@ class QueueManager {
         // --- 6. PRINTED (Verification Spool check) ---
         this.logger.info('LIFECYCLE', `[Job ID: ${job.id}] -> PRINTED. Querying spooler...`);
         await this.updateServerStatus(job.id, 'printed', `Print stream successfully transferred. Checking device buffer...`);
-        const spoolCheck = await this.printerService.monitorSpoolerForJob(this.config.get('printerName') || job.printerName || job.printerId, localFilePath);
+        const spoolCheck = await this.printerService.monitorSpoolerForJob(job.printerName || job.printerId, localFilePath);
 
         if (!spoolCheck.success) {
           throw new Error(spoolCheck.message);
@@ -715,7 +689,7 @@ class HeartbeatService {
     this.config = config;
     this.printerService = printerService;
     this.queueManager = queueManager;
-    this.version = '2.1.0-connector';
+    this.version = '2.0.0-enterprise';
     this.startupTime = Date.now();
     this.intervalId = null;
   }
@@ -745,20 +719,20 @@ class HeartbeatService {
       // 1. Fetch OS devices list
       const detectedPrinters = await this.printerService.getInstalledPrinters();
       
-      // 2. Fetch hardware telemetry of our dedicated local Windows printer
-      const physicalPrinterName = this.config.get('printerName') || printerId;
-      const hardware = await this.printerService.getPrinterHardwareStatus(physicalPrinterName);
+      // 2. Fetch hardware telemetry of our dedicated printer
+      const hardware = await this.printerService.getPrinterHardwareStatus(printerId);
       
       const payload = {
         printerId,
         apiKey,
         detectedPrinters,
-        physicalPrinterName,
         queueLength: this.queueManager.getQueueLength() + (hardware.spoolerJobs || 0),
         paperStatus: hardware.paper,
         tonerStatus: hardware.toner,
         daemonVersion: this.version,
-        uptime: parseFloat(((Date.now() - this.startupTime) / 1000).toFixed(2))
+        uptime: parseFloat(((Date.now() - this.startupTime) / 1000).toFixed(2)),
+        sumatraInstalled: process.platform === 'win32' ? fs.existsSync(this.printerService.sumatraPath) : true,
+        sumatraPath: process.platform === 'win32' ? this.printerService.sumatraPath : ''
       };
 
       this.logger.debug('HEARTBEAT', `Transmitting diagnostic telemetry heartbeat packet...`);
@@ -825,15 +799,13 @@ class MonitoringServer {
         const diskFree = await this.getDiskFreeSpace();
         const printers = await this.printerService.getInstalledPrinters();
         const printerId = this.config.get('printerId');
-        const physicalPrinterName = this.config.get('printerName') || printerId;
-        const printerConnected = printers.includes(physicalPrinterName);
+        const printerConnected = printers.includes(printerId);
         
         const health = {
           status: 'healthy',
-          daemonVersion: '2.1.0-connector',
+          daemonVersion: '2.0.0-enterprise',
           uptime: process.uptime(),
           printerId: printerId,
-          printerName: physicalPrinterName,
           printerConnected: printerConnected,
           queueLength: this.queueManager.getQueueLength(),
           memory: {
@@ -944,7 +916,6 @@ class DaemonApp {
     this.logger.info('APP', '      REMOTE PRINT AGENT DAEMON STARTING          ');
     this.logger.info('APP', '==================================================');
     this.logger.info('APP', `Printer ID  : ${printerId}`);
-    this.logger.info('APP', `Printer Name: ${this.configService.get('printerName') || '(using cloud printer ID)'}`);
     this.logger.info('APP', `Server Host : ${this.configService.get('serverUrl')}`);
     this.logger.info('APP', `Max Retries : ${this.configService.get('maxRetries')} attempts`);
     this.logger.info('APP', `Environment : Node.js ${process.version} | ${process.platform}`);

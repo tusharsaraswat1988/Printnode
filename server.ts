@@ -1,11 +1,11 @@
-import "dotenv/config";
 import express from "express";
 import path from "path";
 import fs from "fs";
 import cookieParser from "cookie-parser";
+import https from "https";
+import http from "http";
 import session from "express-session";
 import crypto from "crypto";
-import bcrypt from "bcryptjs";
 import { createServer as createViteServer } from "vite";
 import { PrintJob, Printer, User, AuditLogEntry } from "./src/types";
 import { LocalFileStorage } from "./src/storage/localStorage";
@@ -54,75 +54,6 @@ storage = new LocalFileStorage();
 logger.info("Active File Storage: LocalFileStorage (./uploads)");
 
 const TOKEN_SECRET = "print-token-secret-xyz-987";
-const BCRYPT_ROUNDS = 10;
-const BCRYPT_HASH_PATTERN = /^\$2[aby]\$/;
-const CONNECTOR_VERSION = "2.1.0";
-const INSTALL_TOKEN_TTL_MS = 15 * 60 * 1000;
-
-type ConnectorInstallToken = {
-  printerId: string;
-  createdBy?: string;
-  expiresAt: number;
-  usedAt?: number;
-};
-
-const connectorInstallTokens = new Map<string, ConnectorInstallToken>();
-
-function isBcryptHash(value: string) {
-  return BCRYPT_HASH_PATTERN.test(value);
-}
-
-async function hashPassword(password: string) {
-  return bcrypt.hash(password, BCRYPT_ROUNDS);
-}
-
-async function verifyPassword(password: string, storedPassword: string) {
-  if (!storedPassword) return false;
-  if (isBcryptHash(storedPassword)) {
-    return bcrypt.compare(password, storedPassword);
-  }
-  return password === storedPassword;
-}
-
-async function upgradeLegacyPasswords() {
-  try {
-    const users = await repository.getUsers();
-    for (const user of users) {
-      if (!isBcryptHash(user.password)) {
-        await repository.saveUser({
-          ...user,
-          password: await hashPassword(user.password),
-        });
-        logger.info(`Upgraded stored password hash for user ${user.mobile}`);
-      }
-    }
-  } catch (err) {
-    logger.error("Failed to upgrade legacy password records", err);
-  }
-}
-
-async function bootstrapInitialAdminFromEnvIfNeeded() {
-  const users = await repository.getUsers();
-  if (users.length > 0) {
-    return { bootstrapped: false, needsSetup: false, hasUsers: true, reason: "existing_users" as const };
-  }
-
-  const adminMobile = process.env.ADMIN_MOBILE?.trim();
-  const adminPassword = process.env.ADMIN_PASSWORD;
-
-  if (!adminMobile || !adminPassword) {
-    return { bootstrapped: false, needsSetup: true, hasUsers: false, reason: "missing_bootstrap_env" as const };
-  }
-
-  await repository.saveUser({
-    mobile: adminMobile,
-    password: await hashPassword(adminPassword),
-    role: "admin",
-  });
-
-  logger.info(`Created initial administrator from environment bootstrap`, { mobile: adminMobile });
-  return { bootstrapped: true, needsSetup: false, hasUsers: true, reason: "bootstrapped_from_env" as const };
-}
 
 function generateToken(user: { mobile: string; role: string }) {
   const payload = JSON.stringify({ mobile: user.mobile, role: user.role });
@@ -142,48 +73,6 @@ function verifyToken(token: string): { mobile: string; role: string } | null {
     return JSON.parse(payload);
   } catch (err) {
     return null;
-  }
-}
-
-function getPublicAppUrl(req: express.Request, port: number) {
-  const configured = process.env.APP_URL?.trim();
-  if (configured) return configured.replace(/\/$/, "");
-  const protocol = req.get("x-forwarded-proto") || req.protocol;
-  const host = req.get("host") || `localhost:${port}`;
-  return `${protocol}://${host}`;
-}
-
-function hashInstallToken(token: string) {
-  return crypto.createHash("sha256").update(token).digest("hex");
-}
-
-function createInstallToken(printerId: string, createdBy?: string) {
-  const token = crypto.randomBytes(32).toString("base64url");
-  const expiresAt = Date.now() + INSTALL_TOKEN_TTL_MS;
-  connectorInstallTokens.set(hashInstallToken(token), { printerId, createdBy, expiresAt });
-  return { token, expiresAt };
-}
-
-function claimInstallToken(token: string) {
-  const tokenHash = hashInstallToken(token);
-  const record = connectorInstallTokens.get(tokenHash);
-  if (!record) return { error: "invalid" as const };
-  if (record.usedAt) return { error: "used" as const };
-  if (Date.now() > record.expiresAt) {
-    connectorInstallTokens.delete(tokenHash);
-    return { error: "expired" as const };
-  }
-  record.usedAt = Date.now();
-  connectorInstallTokens.set(tokenHash, record);
-  return { record };
-}
-
-function pruneExpiredInstallTokens() {
-  const now = Date.now();
-  for (const [tokenHash, record] of connectorInstallTokens.entries()) {
-    if (record.usedAt || now > record.expiresAt) {
-      connectorInstallTokens.delete(tokenHash);
-    }
   }
 }
 
@@ -219,9 +108,6 @@ async function startServer() {
       repository = new LocalJSONRepository();
     }
   }
-
-  await bootstrapInitialAdminFromEnvIfNeeded();
-  await upgradeLegacyPasswords();
 
   // Rate Limiting Middleware
   const rateLimitMap = new Map<string, { count: number; resetTime: number }>();
@@ -342,84 +228,16 @@ async function startServer() {
   });
 
   // --- AUTHENTICATION ENDPOINTS ---
-  app.get("/api/setup/status", async (req, res) => {
-    try {
-      const state = await bootstrapInitialAdminFromEnvIfNeeded();
-      res.json({
-        hasUsers: state.hasUsers,
-        needsSetup: state.needsSetup,
-        reason: state.reason,
-        canBootstrapFromEnv: Boolean(process.env.ADMIN_MOBILE?.trim() && process.env.ADMIN_PASSWORD),
-      });
-    } catch (err) {
-      logger.error("Failed to resolve setup status", err);
-      res.status(500).json({ error: "Failed to resolve setup status" });
-    }
-  });
-
-  app.post("/api/setup/initialize", async (req: any, res: any) => {
-    const { mobile, password } = req.body;
-
-    if (!mobile || !password) {
-      return res.status(400).json({ error: "Mobile number and password are required" });
-    }
-
-    try {
-      const users = await repository.getUsers();
-      if (users.length > 0) {
-        return res.status(409).json({ error: "Setup has already been completed" });
-      }
-
-      const newAdmin: User = {
-        mobile: String(mobile).trim(),
-        password: await hashPassword(password),
-        role: "admin",
-      };
-
-      await repository.saveUser(newAdmin);
-
-      const sessionUser = { mobile: newAdmin.mobile, role: newAdmin.role };
-      req.session.user = sessionUser;
-      const token = generateToken(sessionUser);
-
-      req.session.save((err) => {
-        if (err) {
-          logger.error("Failed to persist setup session", err);
-          return res.status(500).json({ error: "Administrator created but session could not be saved" });
-        }
-        res.status(201).json({ success: true, user: sessionUser, token });
-      });
-    } catch (err) {
-      logger.error("Failed to initialize first administrator", err);
-      res.status(500).json({ error: "Failed to initialize first administrator" });
-    }
-  });
-
   app.post("/api/login", async (req: any, res: any) => {
     const { mobile, password } = req.body;
     logger.info(`Login step 1: Received login request`, { mobile, hasPassword: !!password });
     try {
-      const setupState = await bootstrapInitialAdminFromEnvIfNeeded();
-      if (setupState.needsSetup) {
-        return res.status(409).json({
-          error: "Setup is required before logging in",
-          needsSetup: true,
-          reason: "missing_bootstrap_env",
-        });
-      }
-
       const users = await repository.getUsers();
       logger.info(`Login step 2: Retrieved users from repository`, { count: users.length });
       
-      const user = users.find(u => u.mobile === mobile);
+      const user = users.find(u => u.mobile === mobile && u.password === password);
       
-      if (user && await verifyPassword(password, user.password)) {
-        if (!isBcryptHash(user.password)) {
-          await repository.saveUser({
-            ...user,
-            password: await hashPassword(password),
-          });
-        }
+      if (user) {
         logger.info(`Login step 3: Password verification succeeded. Saving session.`, { mobile, role: user.role });
         const sessionUser = { mobile: user.mobile, role: user.role || "employee" };
         req.session.user = sessionUser;
@@ -471,8 +289,6 @@ async function startServer() {
     res.json({ user });
   });
 
-  setInterval(pruneExpiredInstallTokens, 60 * 1000);
-
   // --- ADMIN PANEL USER MANAGEMENT (RBAC Protected) ---
   app.post("/api/admin/users", requireAdmin, async (req: any, res: any) => {
     const { mobile, password, role } = req.body;
@@ -481,8 +297,8 @@ async function startServer() {
     }
     try {
       const newUser: User = {
-        mobile: String(mobile).trim(),
-        password: await hashPassword(password),
+        mobile,
+        password,
         role: role || "employee"
       };
       await repository.saveUser(newUser);
@@ -494,124 +310,16 @@ async function startServer() {
     }
   });
 
-  // --- WINDOWS CONNECTOR TOKEN PAIRING ---
-  app.post("/api/connectors/install-token", isAuthenticated, async (req: any, res: any) => {
-    const { printerId } = req.body;
-    if (!printerId) {
-      return res.status(400).json({ error: "printerId is required" });
-    }
-
-    try {
-      const printer = await repository.getPrinter(String(printerId));
-      if (!printer) {
-        return res.status(404).json({ error: "Printer not found" });
-      }
-
-      const { token, expiresAt } = createInstallToken(printer.id, req.session?.user?.mobile);
-      const appUrl = getPublicAppUrl(req, PORT);
-      res.status(201).json({
-        token,
-        expiresAt: new Date(expiresAt).toISOString(),
-        connectorVersion: CONNECTOR_VERSION,
-        downloadUrl: `${appUrl}/api/connectors/windows/download?token=${encodeURIComponent(token)}`,
-        claimUrl: `${appUrl}/api/connectors/claim`,
-      });
-    } catch (err) {
-      logger.error("Failed to create connector install token", err);
-      res.status(500).json({ error: "Failed to create connector install token" });
-    }
-  });
-
-  app.get("/api/connectors/windows/download", (req, res) => {
-    const token = String(req.query.token || "");
-    const downloadRecord = token ? connectorInstallTokens.get(hashInstallToken(token)) : null;
-    if (!downloadRecord || downloadRecord.usedAt || Date.now() > downloadRecord.expiresAt) {
-      return res.status(400).send("Invalid or expired connector download token.");
-    }
-
-    const candidates = [
-      path.join(process.cwd(), "dist", "connectors", "BidWar Printer Connector.exe"),
-      path.join(process.cwd(), "src", "connector", "windows", "dist", "BidWar Printer Connector.exe"),
-    ];
-    const installerPath = candidates.find((candidate) => fs.existsSync(candidate));
-
-    if (!installerPath) {
-      return res.status(503).send("BidWar Printer Connector.exe has not been built on this server yet.");
-    }
-
-    const filenamePayload = Buffer.from(JSON.stringify({
-      token,
-      claimUrl: `${getPublicAppUrl(req, PORT)}/api/connectors/claim`,
-    })).toString("base64url");
-
-    res.download(installerPath, `BidWar Printer Connector--${filenamePayload}.exe`);
-  });
-
-  app.post("/api/connectors/claim", async (req, res) => {
-    const { token, physicalPrinterName, hostname, connectorVersion } = req.body || {};
-    if (!token) {
-      return res.status(400).json({ error: "Installation token is required" });
-    }
-
-    const claimed = claimInstallToken(String(token));
-    if ("error" in claimed) {
-      const status = claimed.error === "expired" ? 410 : 401;
-      return res.status(status).json({ error: `Installation token ${claimed.error}` });
-    }
-
-    try {
-      const printer = await repository.getPrinter(claimed.record.printerId);
-      if (!printer) {
-        return res.status(404).json({ error: "Printer no longer exists" });
-      }
-
-      printer.lastSeen = new Date().toISOString();
-      if (printer.status === "offline") {
-        printer.status = "online";
-      }
-      if (connectorVersion) {
-        printer.daemonVersion = String(connectorVersion);
-      }
-      await repository.savePrinter(printer);
-
-      logger.info("Windows connector installation token claimed", {
-        printerId: printer.id,
-        physicalPrinterName,
-        hostname,
-        connectorVersion,
-      });
-
-      res.json({
-        success: true,
-        serverUrl: getPublicAppUrl(req, PORT),
-        printerId: printer.id,
-        apiKey: printer.apiKey,
-        cloudPrinterName: printer.name,
-        printerName: physicalPrinterName || printer.name,
-        connectorVersion: CONNECTOR_VERSION,
-        pollInterval: 5000,
-        heartbeatInterval: 10000,
-      });
-    } catch (err) {
-      logger.error("Failed to claim connector install token", err);
-      res.status(500).json({ error: "Failed to claim connector install token" });
-    }
-  });
-
   // Protect all remaining /api routes (exclude login, me, and daemon routes)
   app.use("/api", (req, res, next) => {
     const isPublic = req.path === "/login" || 
                      req.path === "/me" || 
-                     req.path === "/setup/status" ||
-                     req.path === "/setup/initialize" ||
                      req.path === "/printers/ping" || 
                      req.path.startsWith("/jobs/poll/") || 
                      req.path.endsWith("/download") || 
                      req.path.endsWith("/status") || 
                      req.path === "/download-daemon" ||
-                     req.path === "/client-script" ||
-                     req.path === "/connectors/claim" ||
-                     req.path === "/connectors/windows/download";
+                     req.path === "/client-script";
     if (isPublic) {
       next();
     } else {
@@ -629,6 +337,13 @@ async function startServer() {
       for (const p of printersList) {
         let updated = false;
         
+        // Keep demo printer online if requested
+        if (p.id === "printer-wired-pc" && now - new Date(p.lastSeen).getTime() > 10 * 60 * 1000) {
+          p.lastSeen = new Date().toISOString();
+          p.status = "online";
+          updated = true;
+        }
+
         const lastSeenTime = new Date(p.lastSeen).getTime();
         const diffMinutes = (now - lastSeenTime) / (1000 * 60);
 
@@ -684,7 +399,7 @@ async function startServer() {
       const newPrinter: Printer = {
         id,
         name,
-        location: location || "",
+        location: location || "Unknown Location",
         status: "online",
         apiKey,
         jobCount: 0,
@@ -768,7 +483,8 @@ async function startServer() {
       tonerStatus,
       daemonVersion,
       uptime,
-      physicalPrinterName
+      sumatraInstalled,
+      sumatraPath
     } = req.body;
     
     if (!apiKey || !printerId) {
@@ -787,10 +503,7 @@ async function startServer() {
       }
 
       if (detectedPrinters && Array.isArray(detectedPrinters)) {
-        logger.info(`Detected physical devices from print client '${printerId}':`, {
-          detectedPrinters,
-          physicalPrinterName,
-        });
+        logger.info(`Detected physical devices from print client '${printerId}':`, detectedPrinters);
       }
 
       // Update diagnostic telemetry
@@ -799,6 +512,8 @@ async function startServer() {
       if (tonerStatus !== undefined) printer.tonerStatus = tonerStatus;
       if (daemonVersion !== undefined) printer.daemonVersion = daemonVersion;
       if (uptime !== undefined) printer.uptime = uptime;
+      if (sumatraInstalled !== undefined) printer.sumatraInstalled = sumatraInstalled;
+      if (sumatraPath !== undefined) printer.sumatraPath = sumatraPath;
 
       // Concurrency print check
       const jobsList = await repository.getJobs();
@@ -908,7 +623,7 @@ async function startServer() {
         pageRange: pageRange || "All",
         status: "pending",
         retryCount: 0,
-        userId: req.session?.user?.mobile,
+        userId: req.session?.user?.mobile || "anonymous",
         createdAt: new Date().toISOString(),
         updatedAt: new Date().toISOString(),
         auditLogs: [
@@ -1110,6 +825,116 @@ async function startServer() {
     } catch (err) {
       logger.error(`Failed to cancel print job ${id}`, err);
       res.status(500).json({ error: "Failed to cancel print job" });
+    }
+  });
+
+  // Helper function to download file following redirects
+  function downloadFileWithRedirects(url: string, destPath: string): Promise<void> {
+    return new Promise((resolve, reject) => {
+      const download = (targetUrl: string, depth = 0) => {
+        if (depth > 5) {
+          return reject(new Error("Too many redirects"));
+        }
+
+        const client = targetUrl.startsWith("https") ? https : http;
+        client.get(targetUrl, (response) => {
+          if (response.statusCode === 301 || response.statusCode === 302 || response.statusCode === 307 || response.statusCode === 308) {
+            const redirectUrl = response.headers.location;
+            if (!redirectUrl) {
+              return reject(new Error(`Redirect status ${response.statusCode} with no Location header`));
+            }
+            download(redirectUrl, depth + 1);
+          } else if (response.statusCode === 200) {
+            const file = fs.createWriteStream(destPath);
+            response.pipe(file);
+            file.on("finish", () => {
+              file.close();
+              resolve();
+            });
+            file.on("error", (err) => {
+              fs.unlink(destPath, () => {});
+              reject(err);
+            });
+          } else {
+            reject(new Error(`Server returned status code ${response.statusCode}`));
+          }
+        }).on("error", (err) => {
+          reject(err);
+        });
+      };
+
+      download(url);
+    });
+  }
+
+  // --- WINDOWS CONNECTOR DOWNLOAD ENDPOINT ---
+  app.get("/api/connectors/windows/download", async (req, res) => {
+    const cacheDir = path.join(process.cwd(), "uploads");
+    const installerFilename = "BidWar-Printer-Connector.exe";
+    const localInstallerPath = path.join(cacheDir, installerFilename);
+    
+    // Get GitHub repository from env, default to tusharsaraswat1988/Printnode
+    const githubRepo = process.env.GITHUB_REPO || "tusharsaraswat1988/Printnode";
+    const githubReleaseUrl = `https://github.com/${githubRepo}/releases/latest/download/BidWar-Printer-Connector.exe`;
+
+    // Ensure cache directory exists
+    if (!fs.existsSync(cacheDir)) {
+      fs.mkdirSync(cacheDir, { recursive: true });
+    }
+
+    const serveLocalFile = () => {
+      if (fs.existsSync(localInstallerPath)) {
+        res.setHeader("Content-Disposition", `attachment; filename="${installerFilename}"`);
+        res.setHeader("Content-Type", "application/octet-stream");
+        res.sendFile(localInstallerPath);
+        return true;
+      }
+      return false;
+    };
+
+    try {
+      let needsDownload = true;
+
+      if (fs.existsSync(localInstallerPath)) {
+        const stats = fs.statSync(localInstallerPath);
+        const ageInMs = Date.now() - stats.mtimeMs;
+        const oneHourInMs = 60 * 60 * 1000;
+
+        // If the file was compiled/built within the last hour (e.g. during deployment build),
+        // or if we do not want to force-update, we can skip the remote download
+        if (ageInMs < oneHourInMs) {
+          needsDownload = false;
+        }
+      }
+
+      if (needsDownload) {
+        logger.info(`Attempting to download latest Windows Connector from GitHub: ${githubReleaseUrl}...`);
+        
+        // Download latest installer to temp file first, then rename to prevent serving partial file
+        const tempPath = `${localInstallerPath}.tmp`;
+        await downloadFileWithRedirects(githubReleaseUrl, tempPath);
+        
+        if (fs.existsSync(tempPath)) {
+          fs.renameSync(tempPath, localInstallerPath);
+          logger.info("Successfully fetched and cached latest Windows Connector from GitHub.");
+        }
+      }
+
+      if (!serveLocalFile()) {
+        throw new Error("Local installer file is missing after download attempt");
+      }
+    } catch (err: any) {
+      logger.warn(`Failed to dynamically cache Windows Connector from GitHub (${githubReleaseUrl}): ${err.message}.`);
+      
+      // If we have a local version (e.g. compiled during build phase), serve it as the primary fallback!
+      if (fs.existsSync(localInstallerPath)) {
+        logger.info("Serving local compiled Windows Connector installer as fallback.");
+        if (serveLocalFile()) return;
+      }
+
+      // If absolutely no local file exists and the download failed, redirect directly to the GitHub Release URL as a last-resort redirect
+      logger.warn(`No local binary exists. Redirecting user to GitHub release assets as last resort.`);
+      res.redirect(githubReleaseUrl);
     }
   });
 

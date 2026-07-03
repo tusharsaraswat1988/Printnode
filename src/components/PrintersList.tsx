@@ -1,5 +1,5 @@
 import React, { useState } from "react";
-import { Printer as PrinterIcon, Plus, Trash2, Key, Check, Copy, Wifi, WifiOff, Loader2, Monitor } from "lucide-react";
+import { Printer as PrinterIcon, Plus, Trash2, Key, Check, Copy, Wifi, WifiOff, Loader2, Monitor, AlertTriangle } from "lucide-react";
 import { Printer } from "../types";
 
 interface PrintersListProps {
@@ -201,6 +201,25 @@ export default function PrintersList({ printers, onPrinterAdded, onPrinterDelete
                     <p className="text-[10px] text-slate-400 mt-1.5 font-medium">
                       Last active: {formatLastSeen(p.lastSeen)} • Spooled: {p.jobCount} jobs
                     </p>
+                    {p.sumatraInstalled === false && isOnline && (
+                      <div className="mt-2 p-2.5 bg-red-50 border border-red-100 rounded-xl text-[10px] text-red-600 font-sans font-medium max-w-sm">
+                        <p className="font-bold flex items-center mb-0.5">
+                          <AlertTriangle className="h-3.5 w-3.5 mr-1 text-red-500" />
+                          SumatraPDF Missing
+                        </p>
+                        <p className="text-red-500/90 leading-relaxed">
+                          Windows PDF/image printing requires SumatraPDF. Save <code className="bg-red-100/60 px-1 py-0.5 rounded font-mono text-[9px]">SumatraPDF.exe</code> in the same folder as <code className="bg-red-100/60 px-1 py-0.5 rounded font-mono text-[9px]">print-daemon.js</code>, or set <code className="bg-red-100/60 px-1 py-0.5 rounded font-mono text-[9px]">sumatraPath</code> in <code className="bg-red-100/60 px-1 py-0.5 rounded font-mono text-[9px]">config.json</code>.
+                        </p>
+                        <a 
+                          href="https://www.sumatrapdfreader.org/free-pdf-reader"
+                          target="_blank"
+                          rel="noreferrer"
+                          className="mt-1 inline-flex items-center text-indigo-600 hover:text-indigo-800 font-bold underline"
+                        >
+                          Manual Download SumatraPDF
+                        </a>
+                      </div>
+                    )}
                   </div>
                 </div>
 

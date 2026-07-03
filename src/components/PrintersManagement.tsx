@@ -163,7 +163,7 @@ export default function PrintersManagement({
               <input
                 id="new-p-name"
                 type="text"
-                placeholder="e.g. Front Desk Printer"
+                placeholder="e.g. HP LaserJet Pro M404"
                 value={name}
                 onChange={(e) => setName(e.target.value)}
                 required
@@ -209,7 +209,7 @@ export default function PrintersManagement({
         {filteredPrinters.length === 0 ? (
           <div className="col-span-2 text-center py-16 bg-white border border-slate-200 rounded-2xl">
             <PrinterIcon className="h-12 w-12 text-slate-300 mx-auto mb-3" />
-            <p className="text-sm font-bold text-slate-500">No printers configured</p>
+            <p className="text-sm font-bold text-slate-500">No remote printers registered</p>
             <p className="text-xs text-slate-400 mt-1 max-w-sm mx-auto">Create and link a virtual or hardware printer profile above to enable remote cloud printing.</p>
           </div>
         ) : (
@@ -330,44 +330,36 @@ export default function PrintersManagement({
                   </p>
                 </div>
 
-                <details className="bg-slate-50 rounded-xl border border-slate-100 text-[11px] font-mono">
-                  <summary className="cursor-pointer list-none p-3.5 text-slate-500 font-bold uppercase tracking-wider flex items-center justify-between">
-                    <span className="inline-flex items-center">
-                      <Key className="h-3.5 w-3.5 mr-1.5 text-slate-400" />
-                      Developer Options
-                    </span>
-                    <span className="text-[10px] text-slate-400">Show credentials</span>
-                  </summary>
-                  <div className="px-3.5 pb-3.5 space-y-2">
-                    <div className="flex items-center justify-between gap-3">
-                      <span className="text-slate-400 font-medium">Printer ID:</span>
-                      <div className="flex items-center space-x-1 min-w-0">
-                        <span className="text-slate-800 font-bold bg-white px-1.5 py-0.5 rounded border border-slate-200/60 select-all truncate">{p.id}</span>
-                        <button
-                          onClick={() => copyToClipboard(p.id, p.id + "-id")}
-                          className="p-1 hover:bg-slate-200 rounded text-slate-400 hover:text-slate-700 shrink-0"
-                          title="Copy Printer ID"
-                        >
-                          {copiedId === p.id + "-id" ? <Check className="h-3 w-3 text-emerald-500" /> : <Copy className="h-3 w-3" />}
-                        </button>
-                      </div>
-                    </div>
-
-                    <div className="flex items-center justify-between gap-3">
-                      <span className="text-slate-400 font-medium">Pairing Key:</span>
-                      <div className="flex items-center space-x-1 min-w-0">
-                        <span className="text-slate-800 font-bold bg-white px-1.5 py-0.5 rounded border border-slate-200/60 select-all truncate">{p.apiKey}</span>
-                        <button
-                          onClick={() => copyToClipboard(p.apiKey, p.id + "-key")}
-                          className="p-1 hover:bg-slate-200 rounded text-slate-400 hover:text-slate-700 shrink-0"
-                          title="Copy Pairing Key"
-                        >
-                          {copiedId === p.id + "-key" ? <Check className="h-3 w-3 text-emerald-500" /> : <Copy className="h-3 w-3" />}
-                        </button>
-                      </div>
+                {/* Lower metadata box */}
+                <div className="bg-slate-50 p-3.5 rounded-xl border border-slate-100 space-y-2 text-[11px] font-mono">
+                  <div className="flex items-center justify-between">
+                    <span className="text-slate-400 font-medium">Printer ID:</span>
+                    <div className="flex items-center space-x-1">
+                      <span className="text-slate-800 font-bold bg-white px-1.5 py-0.5 rounded border border-slate-200/60 select-all">{p.id}</span>
+                      <button
+                        onClick={() => copyToClipboard(p.id, p.id + "-id")}
+                        className="p-1 hover:bg-slate-200 rounded text-slate-400 hover:text-slate-700"
+                        title="Copy Printer ID"
+                      >
+                        {copiedId === p.id + "-id" ? <Check className="h-3 w-3 text-emerald-500" /> : <Copy className="h-3 w-3" />}
+                      </button>
                     </div>
                   </div>
-                </details>
+
+                  <div className="flex items-center justify-between">
+                    <span className="text-slate-400 font-medium">Pairing Key:</span>
+                    <div className="flex items-center space-x-1">
+                      <span className="text-slate-800 font-bold bg-white px-1.5 py-0.5 rounded border border-slate-200/60 select-all">{p.apiKey}</span>
+                      <button
+                        onClick={() => copyToClipboard(p.apiKey, p.id + "-key")}
+                        className="p-1 hover:bg-slate-200 rounded text-slate-400 hover:text-slate-700"
+                        title="Copy Pairing Key"
+                      >
+                        {copiedId === p.id + "-key" ? <Check className="h-3 w-3 text-emerald-500" /> : <Copy className="h-3 w-3" />}
+                      </button>
+                    </div>
+                  </div>
+                </div>
               </div>
             );
           })

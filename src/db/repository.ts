@@ -101,10 +101,11 @@ export class LocalJSONRepository implements DataRepository {
 
   async getUsers(): Promise<User[]> {
     this.load();
-    return this.users.map((user) => ({
-      ...user,
-      role: user.role || "employee",
-    }));
+    if (this.users.length === 0) {
+      this.users = [{ mobile: "1234567890", password: "123456", role: "admin" }];
+      this.save();
+    }
+    return this.users;
   }
 
   async saveUser(user: User): Promise<void> {
@@ -197,6 +198,65 @@ export class NeonRepository implements DataRepository {
             role TEXT NOT NULL
           );
         `);
+
+        // Insert default admin and employee users if they don't exist
+        await client.query(`
+          INSERT INTO users (mobile, password, role) 
+          VALUES 
+            ('1234567890', '123456', 'admin'),
+            ('9876543210', 'password123', 'employee')
+          ON CONFLICT (mobile) DO NOTHING;
+        `);
+
+        // Seed printers if printers table is empty
+        const printerCheck = await client.query("SELECT COUNT(*) FROM printers;");
+        if (parseInt(printerCheck.rows[0].count) === 0) {
+          console.log("Seeding default printers into Neon DB...");
+          await client.query(`
+            INSERT INTO printers (id, name, location, status, last_seen, api_key, job_count)
+            VALUES 
+              ('printer-wired-pc', 'Deskjet 2700 Series', 'Living Room Wired PC', 'offline', '2026-07-02T04:38:41.429Z', 'print_k_d3b1f9', 2),
+              ('printer-office-laser', 'LaserJet Pro M404', 'Office Room 4B', 'offline', '2026-07-01T14:13:10.691Z', 'print_k_a8c2f1', 5)
+            ON CONFLICT (id) DO NOTHING;
+          `);
+        }
+
+        // Seed some sample jobs if jobs table is empty
+        const jobCheck = await client.query("SELECT COUNT(*) FROM jobs;");
+        if (parseInt(jobCheck.rows[0].count) === 0) {
+          console.log("Seeding sample print jobs into Neon DB...");
+          const auditLogs001 = JSON.stringify([
+            { timestamp: "2026-07-01T10:00:00.000Z", status: "pending", message: "Job created" },
+            { timestamp: "2026-07-01T10:01:00.000Z", status: "printing", message: "Job sent to printer" },
+            { timestamp: "2026-07-01T10:02:00.000Z", status: "printed", message: "Successfully printed" }
+          ]);
+          const auditLogs002 = JSON.stringify([
+            { timestamp: "2026-07-01T12:00:00.000Z", status: "pending", message: "Job created and waiting in queue" }
+          ]);
+
+          await client.query(`
+            INSERT INTO jobs (
+              id, printer_id, file_name, file_type, file_size, file_id, sha256, 
+              copies, color_mode, paper_size, duplex, orientation, page_range, 
+              status, status_message, retry_count, user_id, printed_at, audit_logs, 
+              created_at, updated_at
+            )
+            VALUES 
+              (
+                'job-001', 'printer-wired-pc', 'monthly_report.pdf', 'application/pdf', 154200, 'mock-file-1', 'sha-256-mock-1', 
+                1, 'mono', 'A4', 'duplex', 'portrait', '1-5', 
+                'printed', 'Success', 0, '1234567890', '2026-07-01T10:02:00.000Z', $1, 
+                '2026-07-01T10:00:00.000Z', '2026-07-01T10:02:00.000Z'
+              ),
+              (
+                'job-002', 'printer-office-laser', 'presentation_slides.pptx', 'application/vnd.openxmlformats-officedocument.presentationml.presentation', 4500000, 'mock-file-2', 'sha-256-mock-2', 
+                3, 'color', 'Letter', 'simplex', 'landscape', NULL, 
+                'pending', 'Waiting in queue', 0, '9876543210', NULL, $2, 
+                '2026-07-01T12:00:00.000Z', '2026-07-01T12:00:00.000Z'
+              )
+            ON CONFLICT (id) DO NOTHING;
+          `, [auditLogs001, auditLogs002]);
+        }
 
         this.isInitialized = true;
         console.log("Neon DB schema initialized and verified successfully.");
@@ -430,6 +490,11 @@ export class NeonRepository implements DataRepository {
     await this.initializeSchema();
     try {
       const res = await this.pool.query("SELECT * FROM users");
+      if (res.rows.length === 0) {
+        const defaultUser: User = { mobile: "1234567890", password: "123456", role: "admin" };
+        await this.saveUser(defaultUser);
+        return [defaultUser];
+      }
       return res.rows.map(row => ({
         mobile: row.mobile,
         password: row.password,
@@ -437,7 +502,7 @@ export class NeonRepository implements DataRepository {
       }));
     } catch (err) {
       console.error("NeonRepository: getUsers failed", err);
-      return [];
+      return [{ mobile: "1234567890", password: "123456", role: "admin" }];
     }
   }
 

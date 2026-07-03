@@ -44,6 +44,8 @@ export interface Printer {
   tonerStatus?: string;
   daemonVersion?: string;
   uptime?: number;
+  sumatraInstalled?: boolean;
+  sumatraPath?: string;
 }
 
 export interface User {
