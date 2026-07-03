@@ -141,7 +141,7 @@ export default function App() {
     return (
       <div className="min-h-screen flex flex-col items-center justify-center bg-slate-50 font-sans">
         <LoaderSpinner />
-        <p className="text-xs font-bold text-slate-500 mt-3 tracking-wide">Connecting to Remote Print Network...</p>
+        <p className="text-xs font-bold text-slate-500 mt-3 tracking-wide">Connecting to PrintFlow Cloud Network...</p>
       </div>
     );
   }
@@ -183,7 +183,7 @@ export default function App() {
           </div>
           <div>
             <div className="flex items-center space-x-1.5">
-              <h1 className="text-sm font-bold text-slate-800 tracking-tight leading-none sm:text-base">Remote Print</h1>
+              <h1 className="text-sm font-bold text-slate-800 tracking-tight leading-none sm:text-base">PrintFlow Cloud</h1>
               <span className="hidden sm:inline-flex items-center px-2 py-0.5 rounded-full text-[9px] font-bold bg-indigo-50 text-indigo-700 border border-indigo-100/60 uppercase">
                 Enterprise
               </span>
@@ -467,7 +467,7 @@ export default function App() {
         <div className="max-w-7xl mx-auto px-4 space-y-1">
           <p className="font-bold text-slate-500 flex items-center justify-center">
             <PrinterIcon className="h-3.5 w-3.5 mr-1 text-indigo-500 shrink-0" />
-            Enterprise Remote Cloud Print console v2.0
+            PrintFlow Cloud Enterprise Console v2.0
           </p>
           <p className="text-[10px] text-slate-400">Secure TLS transport • Encrypted persistent databases • Real-time synchronization</p>
         </div>
