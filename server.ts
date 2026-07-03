@@ -346,13 +346,6 @@ async function startServer() {
 
       for (const p of printersList) {
         let updated = false;
-        
-        // Keep demo printer online if requested
-        if (p.id === "printer-wired-pc" && now - new Date(p.lastSeen).getTime() > 10 * 60 * 1000) {
-          p.lastSeen = new Date().toISOString();
-          p.status = "online";
-          updated = true;
-        }
 
         const lastSeenTime = new Date(p.lastSeen).getTime();
         const diffMinutes = (now - lastSeenTime) / (1000 * 60);

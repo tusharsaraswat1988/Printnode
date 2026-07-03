@@ -1,24 +1,5 @@
 {
-  "printers": [
-    {
-      "id": "printer-wired-pc",
-      "name": "Deskjet 2700 Series",
-      "location": "Living Room Wired PC",
-      "status": "offline",
-      "apiKey": "print_k_d3b1f9",
-      "jobCount": 2,
-      "lastSeen": "2026-07-03T17:34:13.855Z"
-    },
-    {
-      "id": "printer-office-laser",
-      "name": "LaserJet Pro M404",
-      "location": "Office Room 4B",
-      "status": "offline",
-      "apiKey": "print_k_a8c2f1",
-      "jobCount": 5,
-      "lastSeen": "2026-07-01T14:13:10.691Z"
-    }
-  ],
+  "printers": [],
   "jobs": [],
   "users": [
     {
