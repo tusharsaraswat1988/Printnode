@@ -101,7 +101,19 @@ export class LocalJSONRepository implements DataRepository {
 
   async getUsers(): Promise<User[]> {
     this.load();
-    if (this.users.length === 0) {
+    const envMobile = process.env.ADMIN_MOBILE || process.env.MOBILE || process.env.ADMIN_ID || process.env.ID || process.env.ADMIN_USER || process.env.USER;
+    const envPassword = process.env.ADMIN_PASSWORD || process.env.PASSWORD || process.env.ADMIN_PASS || process.env.PASS;
+
+    if (envMobile && envPassword) {
+      const idx = this.users.findIndex(u => u.mobile === envMobile);
+      if (idx !== -1) {
+        this.users[idx].password = envPassword;
+        this.users[idx].role = "admin";
+      } else {
+        this.users.push({ mobile: envMobile, password: envPassword, role: "admin" });
+      }
+      this.save();
+    } else if (this.users.length === 0) {
       this.users = [{ mobile: "1234567890", password: "123456", role: "admin" }];
       this.save();
     }
@@ -489,6 +501,14 @@ export class NeonRepository implements DataRepository {
   async getUsers(): Promise<User[]> {
     await this.initializeSchema();
     try {
+      const envMobile = process.env.ADMIN_MOBILE || process.env.MOBILE || process.env.ADMIN_ID || process.env.ID || process.env.ADMIN_USER || process.env.USER;
+      const envPassword = process.env.ADMIN_PASSWORD || process.env.PASSWORD || process.env.ADMIN_PASS || process.env.PASS;
+
+      if (envMobile && envPassword) {
+        const envUser: User = { mobile: envMobile, password: envPassword, role: "admin" };
+        await this.saveUser(envUser);
+      }
+
       const res = await this.pool.query("SELECT * FROM users");
       if (res.rows.length === 0) {
         const defaultUser: User = { mobile: "1234567890", password: "123456", role: "admin" };
@@ -502,6 +522,11 @@ export class NeonRepository implements DataRepository {
       }));
     } catch (err) {
       console.error("NeonRepository: getUsers failed", err);
+      const envMobile = process.env.ADMIN_MOBILE || process.env.MOBILE || process.env.ADMIN_ID || process.env.ID || process.env.ADMIN_USER || process.env.USER;
+      const envPassword = process.env.ADMIN_PASSWORD || process.env.PASSWORD || process.env.ADMIN_PASS || process.env.PASS;
+      if (envMobile && envPassword) {
+        return [{ mobile: envMobile, password: envPassword, role: "admin" }];
+      }
       return [{ mobile: "1234567890", password: "123456", role: "admin" }];
     }
   }

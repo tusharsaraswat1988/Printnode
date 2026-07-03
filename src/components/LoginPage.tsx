@@ -54,7 +54,7 @@ export default function LoginPage({ onLogin }: { onLogin: () => void }) {
         <div className="space-y-4">
           <input
             type="text"
-            placeholder="Mobile Number"
+            placeholder="Mobile Number or ID"
             value={mobile}
             onChange={(e) => setMobile(e.target.value)}
             className="w-full px-4 py-3 border border-slate-200 rounded-xl text-sm focus:ring-2 focus:ring-indigo-500 focus:outline-none"
@@ -62,10 +62,9 @@ export default function LoginPage({ onLogin }: { onLogin: () => void }) {
           <div className="relative w-full">
             <input
               type={showPassword ? "text" : "password"}
-              placeholder="6-digit Password"
+              placeholder="Password"
               value={password}
               onChange={(e) => setPassword(e.target.value)}
-              maxLength={6}
               className="w-full pl-4 pr-12 py-3 border border-slate-200 rounded-xl text-sm focus:ring-2 focus:ring-indigo-500 focus:outline-none"
             />
             <button
