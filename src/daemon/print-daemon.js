@@ -16,11 +16,14 @@ const crypto = require('crypto');
 const os = require('os');
 const { exec, spawn } = require('child_process');
 
+const isPackaged = typeof process.pkg !== 'undefined';
+const runtimeDir = isPackaged ? path.dirname(process.execPath) : __dirname;
+
 // ==========================================
 // 1. LOGGER SERVICE (Structured Logs & Rotation)
 // ==========================================
 class LoggerService {
-  constructor(logDir = __dirname) {
+  constructor(logDir = runtimeDir) {
     this.logFile = path.join(logDir, 'daemon.log');
     this.maxLogSize = 5 * 1024 * 1024; // 5MB limit
     this.maxBackupFiles = 3;
@@ -89,7 +92,7 @@ class LoggerService {
 // 2. CONFIGURATION SERVICE (Safe Storage & Key Rotation)
 // ==========================================
 class ConfigurationService {
-  constructor(logger, configPath = path.join(__dirname, 'config.json')) {
+  constructor(logger, configPath = path.join(runtimeDir, 'config.json')) {
     this.logger = logger;
     this.configPath = configPath;
     this.config = {
@@ -511,8 +514,8 @@ class QueueManager {
     
     this.queue = [];
     this.processing = false;
-    this.tempDir = path.join(__dirname, 'temp_prints');
-    this.failedDir = path.join(__dirname, 'failed_prints_diagnostics');
+    this.tempDir = path.join(runtimeDir, 'temp_prints');
+    this.failedDir = path.join(runtimeDir, 'failed_prints_diagnostics');
 
     // Ensure storage boundaries exist
     if (!fs.existsSync(this.tempDir)) fs.mkdirSync(this.tempDir, { recursive: true });
