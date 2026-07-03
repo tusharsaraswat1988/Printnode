@@ -169,14 +169,24 @@ class PrinterService {
     this.logger = logger;
     this.config = config;
     this.binDir = path.join(__dirname, 'bin');
-    
-    // Resolve SumatraPDF path from configuration if specified
-    const configuredPath = this.config.get('sumatraPath');
-    this.sumatraPath = configuredPath ? path.resolve(configuredPath) : path.join(this.binDir, 'SumatraPDF.exe');
+    this.sumatraPath = this.resolveSumatraPath();
 
     if (process.platform === 'win32') {
       this.ensureSumatraPDF();
     }
+  }
+
+  resolveSumatraPath() {
+    const configuredPath = this.config.get('sumatraPath');
+    const candidates = [
+      configuredPath ? path.resolve(configuredPath) : null,
+      path.join(this.binDir, 'SumatraPDF.exe'),
+      path.join(process.resourcesPath || '', 'daemon', 'bin', 'SumatraPDF.exe'),
+      path.join(process.cwd(), 'src', 'daemon', 'bin', 'SumatraPDF.exe')
+    ].filter(Boolean);
+
+    const found = candidates.find((candidate) => fs.existsSync(candidate));
+    return found || candidates[0];
   }
 
   ensureSumatraPDF() {
@@ -184,6 +194,19 @@ class PrinterService {
       this.logger.debug('PRINTER_NATIVE', `SumatraPDF executable found and verified locally at: ${this.sumatraPath}`);
       return true;
     }
+
+    console.warn('\n======================================================================');
+    console.warn('CRITICAL WARNING: Bundled PDF printing runtime is missing.');
+    console.warn(`Expected bundled path: ${this.sumatraPath}`);
+    console.warn('The Windows Connector should ship with PDF printing support built in.');
+    console.warn('----------------------------------------------------------------------');
+    console.warn('Recommended action: reinstall the BidWar Windows Connector installer.');
+    console.warn('If you are running the raw daemon manually, place SumatraPDF.exe in:');
+    console.warn(`   ${this.sumatraPath}`);
+    console.warn('======================================================================\n');
+
+    this.logger.warn('PRINTER_NATIVE', `Bundled SumatraPDF not found at: ${this.sumatraPath}. Windows PDF print operations will fail until the connector is reinstalled or the daemon bundle is repaired.`);
+    return false;
 
     // Since the download links are 404/broken, we log a highly visible warning block with manual instructions.
     console.warn('\n======================================================================');
@@ -296,7 +319,7 @@ class PrinterService {
 
       if (platform === 'win32') {
         if (!fs.existsSync(this.sumatraPath)) {
-          return reject(new Error(`SumatraPDF.exe is missing at path: ${this.sumatraPath}. Windows printing will fail. Please place SumatraPDF.exe at this path or configure "sumatraPath" in your config.json settings.`));
+          return reject(new Error(`Bundled PDF printing runtime is missing at ${this.sumatraPath}. Reinstall the BidWar Windows Connector to restore Windows PDF printing.`));
         }
 
         // Build settings parameters for SumatraPDF

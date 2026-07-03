@@ -7,7 +7,11 @@
   "scripts": {
     "start": "node src/setup.js",
     "service": "node src/service.js",
-    "build": "electron-builder --win nsis"
+    "prepare:sumatra": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\\scripts\\prepare-sumatra.ps1",
+    "verify:sumatra": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\\scripts\\verify-sumatra-runtime.ps1",
+    "test:packaged-sumatra": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\\scripts\\test-packaged-sumatra.ps1",
+    "build": "npm run verify:sumatra && electron-builder --win nsis",
+    "build:release": "npm run build && npm run test:packaged-sumatra"
   },
   "build": {
     "appId": "in.bidwar.printer-connector",
@@ -25,6 +29,14 @@
       {
         "from": "../../daemon/print-daemon.js",
         "to": "daemon/print-daemon.js"
+      },
+      {
+        "from": "resources/vendor/SumatraPDF.exe",
+        "to": "daemon/bin/SumatraPDF.exe"
+      },
+      {
+        "from": "resources/legal",
+        "to": "legal"
       }
     ],
     "win": {

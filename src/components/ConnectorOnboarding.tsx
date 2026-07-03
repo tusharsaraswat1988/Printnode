@@ -143,7 +143,7 @@ export default function ConnectorOnboarding({ printers }: ConnectorOnboardingPro
                 <div>
                   <h2 className="text-base font-bold text-slate-800">{selectedPrinter.name}</h2>
                   <p className="text-xs text-slate-500 mt-1">{selectedPrinter.location || "Windows host PC"}</p>
-                  <p className="text-[11px] text-slate-400 mt-2">The connector installs as a Windows Service, starts with Windows, and reconnects automatically.</p>
+                  <p className="text-[11px] text-slate-400 mt-2">The connector installs as a Windows Service, starts with Windows, reconnects automatically, and includes built-in PDF printing support.</p>
                 </div>
               </div>
 
